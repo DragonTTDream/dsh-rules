@@ -35,7 +35,8 @@ const check = (cond, msg) => { if (cond) console.log(`  ✓ ${msg}`); else { fai
 
 console.log("=== 自动快照关（默认）===");
 {
-  const g = build({});
+  // 显式关掉，不依赖模块默认值（本机部署把默认开成了 true）
+  const g = build({ autoSnapshot: false });
   const r = g({ name: "write", arguments: { file_path: FILE } });
   check(typeof r === "string" && r.includes("没有快照"), "文件写入被拒，且理由是缺快照");
   check(!existsSync(`${SLOT}/${mirror(FILE)}`), "没有偷偷拍快照");
