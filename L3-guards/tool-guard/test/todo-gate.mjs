@@ -65,6 +65,23 @@ console.log("=== 开关关掉 ⇒ 恢复原状 ===");
   check(blocked === 0, "两个阈值都为 0 ⇒ 永不拦");
 }
 
+console.log("=== fail-open：拦两次拦不住就放行，绝不死锁 ===");
+{
+  const g = build({ requireTodoEveryMutations: 2, requireTodoEveryMinutes: 0 });
+  const w = () => g({ name: "edit", arguments: { file_path: "/tmp/x", old_string: "a", new_string: "b" } });
+  w(); w();                       // 计数到 2
+  const b1 = w();                 // 第 1 次拦
+  check(typeof b1 === "string" && b1.includes("最小合法样例"), "第 1 次拦，且给出最小样例");
+  const dup = g({ name: "todo_write", arguments: { todos: [{ content: "A", status: "in_progress" }] } });
+  check(dup === undefined, "先写一次卡（内容新）⇒ 放行并清零");
+  w(); w();
+  const b2 = w();
+  check(typeof b2 === "string", "再次到阈 ⇒ 又拦一次");
+  const b3 = w();
+  check(b3 === undefined, "连续第 2 次拦 ⇒ fail-open 放行（不死锁）");
+  check(w() === undefined, "fail-open 后计数已重置 ⇒ 继续放行");
+}
+
 console.log(`\n失败 ${fail}`);
 console.log(fail === 0 ? "TODO-GATE GREEN" : "TODO-GATE RED");
 process.exit(fail === 0 ? 0 : 1);

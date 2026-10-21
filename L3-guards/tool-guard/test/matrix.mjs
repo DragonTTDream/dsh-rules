@@ -7,7 +7,7 @@ const fakeCtx = {
   effect: () => {},
   logger: { info: () => {} },
 };
-apply(fakeCtx, { logFile: "/tmp/dsh-guard-test/guard.log", hostServices: ["app.service"], requireSnapshot: false });
+apply(fakeCtx, { logFile: "/tmp/dsh-guard-test/guard.log", hostServices: ["app.service"], requireSnapshot: false, requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0 });
 
 // 2026-10-22：重启类命令现在要求本轮授权；矩阵里的「合法重启」用例先给授权上下文
 setSessionUserText("重启宿主并停服务");
@@ -156,7 +156,7 @@ else { fail++; console.log("  FALSE-POSITIVE  arbitrate_run 无重启"); }
 console.log("=== 逃生口 allowPatterns ===");
 let g2 = null;
 apply({ tools: { guard: (fn) => { g2 = fn; return () => {}; } }, effect: () => {}, logger: { info: () => {} } },
-  { logFile: "/tmp/dsh-guard-test/guard2.log", allowPatterns: ["^pkill -f main\\.py$"] });
+  { logFile: "/tmp/dsh-guard-test/guard2.log", requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0, allowPatterns: ["^pkill -f main\\.py$"] });
 const e1 = g2({ name: "bash", arguments: { command: "pkill -f main.py" } });
 if (e1 === undefined) console.log("  allow ✓ 豁免生效");
 else { fail++; console.log("  MISS  豁免未生效"); }

@@ -90,7 +90,7 @@ const DEFAULTS = {
   nudgeTodoAfterMinutes: 20,
   // 2026-10-22 用户令：卡片不许"跑完再更新"。软提示无效（实测 50 次改盘只更新 1 次卡片、
   // 第 1 次还在 5 次改盘之后）⇒ 改成硬门：改盘 N 次或 M 分钟没**有效**更新卡片，就拒下一次改盘。
-  requireTodoEveryMutations: 8,
+  requireTodoEveryMutations: 8,   // 改盘 8 次没有效更新 ⇒ 拦一次；连续两次拦不住就 fail-open 放行（不死锁）
   requireTodoEveryMinutes: 10,
   denyBackgroundSubagent: true,
   // 2026-10-22 用户令：重启等会中断生产的动作，必须由**本轮用户消息**明确授权。
@@ -755,6 +755,7 @@ export function apply(ctx, config = {}) {
   let lastTodoAt = Date.now();
   let todoFingerprint = "";
   let mutSinceTodo = 0;
+  let todoBlocks = 0;   // 连续被拦次数：≥2 ⇒ fail-open，绝不让会话卡死
   try {
     ctx?.on?.("agent/pre-step", async (payload, next) => {
       const t = latestUserText(payload?.messages);
@@ -882,15 +883,25 @@ export function apply(ctx, config = {}) {
         }
         todoFingerprint = fp;
         mutSinceTodo = 0;
+        todoBlocks = 0;
         lastTodoAt = Date.now();
       } else if (isMut) {
         const mins = (Date.now() - lastTodoAt) / 60000;
         const overMut = everyMut > 0 && mutSinceTodo >= everyMut;
         const overMin = everyMin > 0 && mins >= everyMin && mutSinceTodo >= 2;
         if (overMut || overMin) {
+          todoBlocks += 1;
+          if (todoBlocks >= 2) {
+            // fail-open：拦不住就放行，绝不让会话卡在「改盘被拒 ↔ 卡片写不对」之间
+            mutSinceTodo = 0;
+            todoBlocks = 0;
+            return undefined;
+          }
           return `任务卡片过期（已连续 ${mutSinceTodo} 次改盘 / ${Math.round(mins)} 分钟没更新）⇒ 先 todo_write 再继续。`
-            + "要求：已完成项标 completed、当前进度与下一步写清楚（**同内容重写不算更新**）。"
-            + "判据来自实测：50 次改盘只更新过 1 次卡片，而且那次也是在 5 次改盘之后。";
+            + "卡片是进度快照，不是收尾报告；**同内容重写不算更新**。最小合法样例：\n"
+            + '  todos: [{"content":"B1 索引纠偏","status":"completed"},'
+            + '{"content":"B2 快照归位","status":"in_progress"},{"content":"B3 README 死声明","status":"pending"}]\n'
+            + "（实测：50 次改盘只更新过 1 次卡片，且那次还发生在 5 次改盘之后。）";
         }
         mutSinceTodo += 1;
       }
