@@ -17,7 +17,7 @@
  *   7) 逃生口：enabled 开关 + allowPatterns 豁免正则。
  */
 
-import { appendFile, existsSync, mkdir } from "node:fs";
+import { appendFile, copyFileSync, existsSync, mkdir, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -37,6 +37,8 @@ export const Config = z.object({
   denyRestartWithBackground: z.boolean(),
   denyRestartInScript: z.boolean(),
   requireSnapshot: z.boolean(),
+  autoSnapshot: z.boolean(),
+  maxAutoSnapshotBytes: z.number(),
   snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -57,6 +59,12 @@ const DEFAULTS = {
   denyRestartWithBackground: true,
   denyRestartInScript: true,
   requireSnapshot: true,
+  // 自动快照：写入宿主消费集时，目标若是「小文件」就当场拍一张再放行，
+  // 而不是拒掉让模型再跑一次 snap.sh。
+  // 依据：97 次闸门拒绝里 52 次的目标是文件（最大 36 KB），逐次人肉拍快照纯属流程税。
+  // 只对已存在的普通文件生效；目录、超大文件、不存在的路径仍走拒绝 + 路标。
+  autoSnapshot: false,
+  maxAutoSnapshotBytes: 8388608,
   snapshotSlot: "~/.dsh/snapshots/latest",
   // 宿主消费集：运行中的服务 / profile 启动时加载 / 每步注入的指令
   snapshotTargets: [
@@ -328,27 +336,106 @@ function snapshotExists(slot, p) {
   return false;
 }
 
+
+/** 闸门放行前的自动快照：只对已存在的小文件同步拍一张，失败就退回拒绝。 */
+function tryAutoSnapshot(slot, p, maxBytes) {
+  try {
+    const st = statSync(p);
+    if (!st.isFile() || st.size > maxBytes) return false;
+    const dest = join(slot, mirrorName(p));
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(p, dest);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function under(p, prefixes) {
   return prefixes.some((pre) => p === pre || p.startsWith(`${pre}/`));
 }
 
-/** 从 shell 命令里取「写入的绝对路径」：写入动词的目标 + 重定向目标 */
+/**
+ * 从 shell 命令里取「内容会被改写的绝对路径」。
+ *
+ * 第一版只做一件事：把写入类动词后面所有以 / 或 ~ 开头的 token 全算成写入点。
+ * 代价是两类系统性误杀（2026-10-21 日志回放）：
+ *   - 方向不分：`cp <插件文件> /tmp/备份` 把**源**也当成写入点；
+ *   - 动词不分：`chmod` / `mkdir` / `touch` 根本不改内容，拍了快照和没拍一样。
+ *
+ * 现在按动词分类：
+ *   metadata 类 ⇒ 不计（快照对它们没有意义）
+ *   方向敏感类 ⇒ 只取目的地
+ *   其余内容类 ⇒ 取全部目标
+ */
+/** 会被快照闸门关心的动词全集（metadata 类在内，但会被上面的判据先排除） */
 const WRITE_VERBS = new Set([
   "rm", "mv", "cp", "install", "tee", "dd", "truncate", "rsync", "patch",
-  "chmod", "chown", "ln", "touch", "mkdir", "rmdir", "tar", "unzip", "sed",
+  "chmod", "chown", "chgrp", "ln", "touch", "mkdir", "rmdir", "tar", "unzip", "sed",
 ]);
-function shellWriteTargets(cmd) {
+const METADATA_VERBS = new Set(["chmod", "chown", "chgrp", "touch", "mkdir", "rmdir", "ln"]);
+const DEST_ONLY_VERBS = new Set(["cp", "install", "rsync"]);
+const CONTENT_VERBS = new Set(["rm", "mv", "tee", "dd", "truncate", "patch", "unzip", "sed", "tar"]);
+
+function isPathish(tk) {
+  return tk.startsWith("/") || tk.startsWith("~");
+}
+function clean(tk) {
+  return expand(tk.replace(/^['"]|['"]$/g, ""));
+}
+/** 取某个选项后面紧跟的值（-C dir / -d dir / -t dir / --directory=dir） */
+function optValue(rest, names) {
+  for (let i = 0; i < rest.length; i += 1) {
+    const tk = rest[i];
+    for (const n of names) {
+      if (tk === n && rest[i + 1]) return rest[i + 1];
+      if (tk.startsWith(`${n}=`)) return tk.slice(n.length + 1);
+      if (n.length === 2 && tk.startsWith(n) && tk.length > 2) return tk.slice(n.length); // -Cdir
+    }
+  }
+  return undefined;
+}
+
+export function shellWriteTargets(cmd) {
   const out = [];
-  for (const m of cmd.matchAll(/(?:^|[\s;])>>?\s*(['"]?)(\/[^\s'"]+)\1/g)) out.push(m[2]);
+  // 重定向目标永远算
+  for (const m of String(cmd).matchAll(/(?:^|[\s;])>>?\s*(['"]?)(\/[^\s'"]+)\1/g)) out.push(m[2]);
+
   for (const seg of segments(cmd)) {
     const argv = parseArgv(seg);
-    if (!argv || !WRITE_VERBS.has(basename(argv.exe))) continue;
-    const sedInplace = argv.exe === "sed" && argv.rest.includes("-i");
-    if (argv.exe === "sed" && !sedInplace) continue;
-    for (const tk of argv.rest) {
-      if (tk.startsWith("-")) continue;
-      if (tk.startsWith("/") || tk.startsWith("~")) out.push(expand(tk.replace(/^['"]|['"]$/g, "")));
+    const exe = basename(argv.exe);
+    if (!exe || METADATA_VERBS.has(exe) || !WRITE_VERBS.has(exe)) continue;
+
+    const rest = argv.rest;
+    const operands = rest.filter((t) => !t.startsWith("-"));
+
+    if (exe === "sed") {
+      if (!rest.includes("-i")) continue;
+      for (const tk of operands.slice(1)) if (isPathish(tk)) out.push(clean(tk));
+      continue;
     }
+    if (exe === "tar") {
+      const dir = optValue(rest, ["-C", "--directory"]);
+      if (dir) out.push(clean(dir));
+      continue;
+    }
+    if (exe === "unzip") {
+      const dir = optValue(rest, ["-d"]);
+      if (dir) out.push(clean(dir));
+      continue;
+    }
+    if (exe === "dd") {
+      for (const tk of rest) if (/^of=/.test(tk)) out.push(clean(tk.slice(3)));
+      continue;
+    }
+    if (DEST_ONLY_VERBS.has(exe)) {
+      const td = optValue(rest, ["-t", "--target-directory"]);
+      const dest = td || operands[operands.length - 1];
+      if (dest && isPathish(dest)) out.push(clean(dest));
+      continue;
+    }
+    // 内容类其余：rm / mv / tee / truncate / patch —— 全部目标都算（mv 的源也是被移走的）
+    for (const tk of operands) if (isPathish(tk)) out.push(clean(tk));
   }
   return out;
 }
@@ -361,6 +448,8 @@ export function apply(ctx, config = {}) {
   const disposeAllow = (cfg.disposeAllow || []).map(expand);
   const enabled = cfg.enabled !== false;
   const slot = expand(cfg.snapshotSlot);
+  const autoSnap = cfg.autoSnapshot === true;
+  const maxAutoSnapBytes = Number(cfg.maxAutoSnapshotBytes) || 8388608;
   const targets_prefix = cfg.snapshotTargets.map(expand);
   const exempt_prefix = cfg.snapshotExempt.map(expand);
 
@@ -387,6 +476,10 @@ export function apply(ctx, config = {}) {
         .filter(({ abs }) => abs && under(abs, targets_prefix) && !under(abs, exempt_prefix));
       for (const { abs } of hits) {
         if (snapshotExists(slot, abs)) continue;
+        if (autoSnap && tryAutoSnapshot(slot, abs, maxAutoSnapBytes)) {
+          log(`AUTOSNAP target=${abs}`);
+          continue;
+        }
         return `宿主消费集内的写入没有快照，失败无法自动回退（规则 R-12）。先跑：snap.sh '${abs}'（单槽，仅留最新），再执行本次写入；还原用 restore.sh '${abs}'。豁免前缀：${cfg.snapshotExempt.join(" ")}`;
       }
     }

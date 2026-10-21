@@ -33,6 +33,10 @@
         #       没有就拒绝，并在理由里直接给出该跑的 snap 命令。
         # 保证不了：快照新鲜度（闸门看不出快照是不是本次动手前做的）⇒ 靠规则。
         requireSnapshot: true
+        # 自动快照：目标若是「已存在的小文件」就当场拍一张再放行，不再拒掉让人重跑。
+        # 目录 / 超大文件 / 不存在的路径仍走拒绝 + 路标。
+        autoSnapshot: true
+        maxAutoSnapshotBytes: 8388608
         snapshotSlot: ~/.dsh/snapshots/latest
         snapshotTargets:
           - ~/.dsh/profiles
