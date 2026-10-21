@@ -127,5 +127,6 @@ bin/lint.sh
 - [x] L0 常驻规则 15 条 + 元数据
 - [x] 事故台账（10 篇案例）
 - [x] L2 技能 10 个全量收录（新增 debug-discipline）
+- [x] `templates/delegate.md`：委派单（三段填空）
 - [x] L3 守卫判别器开源（deny-list + 判别器 + 陷阱用例，全绿）
 - [x] L4 自制能力型插件 2 个（self-recall / vision-forward）
