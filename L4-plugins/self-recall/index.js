@@ -406,6 +406,14 @@ export function apply(ctx, config = {}) {
     pendingScanMs: num(config.pendingScanMs, DEFAULTS.pendingScanMs, 5000),
     auxModels: arr(config.auxModels, DEFAULTS.auxModels),
     localModels: arr(config.localModels, DEFAULTS.localModels),
+    // 2026-10-22：以下键此前只加了 schema 与 DEFAULTS，**漏进这个白名单解析器** ⇒ 配置覆盖被静默忽略。
+    failFastSec: num(config.failFastSec, DEFAULTS.failFastSec, 0),
+    stallMinutes: num(config.stallMinutes, DEFAULTS.stallMinutes, 0),
+    attemptBudget: num(config.attemptBudget, DEFAULTS.attemptBudget, 0),
+    circuitAfter: num(config.circuitAfter, DEFAULTS.circuitAfter, 0),
+    ledgerPath: str(config.ledgerPath, DEFAULTS.ledgerPath),
+    singleWindow: config.singleWindow !== false,
+    lockPath: str(config.lockPath, DEFAULTS.lockPath),
   };
   const log = ctx.logger;
   let attempts = 0, lastFailure = 0;

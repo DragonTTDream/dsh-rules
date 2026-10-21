@@ -2,10 +2,14 @@
 // 起因（2026-10-22）：加重跑治理时 execute 的解构没绑 change，node --check 只验语法，
 // 单测又只测纯函数 decideRerun ⇒ 真跑必抛 ReferenceError，三次窗口全卡在提交阶段。
 import { apply } from "../index.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 let fail = 0;
 const check = (c, m, e = "") => { if (c) console.log(`  ✓ ${m}`); else { fail += 1; console.log(`  ✗ ${m}${e ? "  " + e : ""}`); } };
 
+const work = mkdtempSync(join(tmpdir(), "facts-smoke-"));   // 每次独立：台账/锁不留跨轮状态
 let tools = {};
 const ctx = {
   tools: { guard: () => () => {}, register: (t) => { tools[t.name] = t; return () => {}; } },
@@ -22,9 +26,9 @@ apply(ctx, {
   localModels: [],
   warmAfterRun: false,
   singleWindow: true,
-  lockPath: "/tmp/facts-smoke/window.lock",
-  ledgerPath: "/tmp/facts-smoke/attempts.jsonl",
-  logFile: "/tmp/facts-smoke/self-recall.log",
+  lockPath: join(work, "window.lock"),
+  ledgerPath: join(work, "attempts.jsonl"),
+  logFile: join(work, "self-recall.log"),
 });
 
 check(!!tools.arbitrate_run, "arbitrate_run 已注册");
@@ -48,5 +52,6 @@ try {
 }
 
 console.log(`\n失败 ${fail}`);
+rmSync(work, { recursive: true, force: true });
 console.log(fail === 0 ? "EXECUTE-SMOKE GREEN" : "EXECUTE-SMOKE RED");
 process.exit(fail === 0 ? 0 : 1);
