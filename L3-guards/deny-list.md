@@ -48,6 +48,9 @@ enforced_by: [guard]
 7. **按目标判，不按动词判。** 出现 `rm -rf` 本身不是风险信号，**目标是什么**才是。
    动词判据对误杀零容忍：一次误判就让这条纪律在用户眼里整体失效。
    实测教训见 [`../incidents/INC-2026-10-21-guard-too-blunt.md`](../incidents/INC-2026-10-21-guard-too-blunt.md)。
+8. **日志要脱敏，权限要收紧。** 日志记的是命令原文，而原文里常有口令。
+   遮蔽规则要覆盖明文口令的常见形态，并且**大小写不敏感**。
+   实测教训见 [`../incidents/INC-2026-10-21-guard-log-leak.md`](../incidents/INC-2026-10-21-guard-log-leak.md)。
 
 ## 四、参考实现
 

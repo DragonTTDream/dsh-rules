@@ -17,7 +17,7 @@
  *   7) 逃生口：enabled 开关 + allowPatterns 豁免正则。
  */
 
-import { appendFile, copyFileSync, existsSync, mkdir, mkdirSync, statSync } from "node:fs";
+import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -43,6 +43,19 @@ export const Config = z.object({
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
 });
+
+/**
+ * 日志脱敏。守卫会把命令前缀写进日志，而那里面经常带口令：
+ * 实测线上日志里 `sshpass -p <口令>` 出现过 10 次，明文落盘且文件是 644。
+ * 日志是排障资产，不能变成凭据泄漏面。
+ */
+function redact(text) {
+  return String(text)
+    .replace(/(\bsshpass\b[^\n]*?\s-p)\s+\S+/g, "$1 ***")
+    .replace(/(--password[=\s])\S+/gi, "$1***")
+    .replace(/(\b[A-Za-z_]*(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_?KEY)[A-Za-z_]*=)\S+/gi, "$1***")
+    .replace(/(Authorization:\s*\w+\s+)\S+/gi, "$1***");
+}
 
 const DEFAULTS = {
   enabled: true,
@@ -96,6 +109,30 @@ function segments(cmd) {
     .filter(Boolean);
 }
 
+/**
+ * 收集同一条命令里的「字面量赋值」。只认不含 $ 与反引号的值；
+ * 解不出来的一律原样保留 ⇒ 仍然走拒绝。
+ * 依据：命令里先赋一个绝对路径、再在删除/查找里引用它，是日常高频形态，
+ * 而变量名本身无法静态判定 ⇒ 第一版把所有变量目标一刀拒掉，误杀面很宽。
+ */
+function collectVars(cmd) {
+  const out = {};
+  const rx = /(?:^|[\s;(])([A-Za-z_][A-Za-z0-9_]*)=("([^"$`]*)"|'([^'$`]*)'|([^\s;|&()$`"']+))/g;
+  for (const m of String(cmd).matchAll(rx)) {
+    const val = m[3] ?? m[4] ?? m[5] ?? "";
+    if (val) out[m[1]] = val;
+  }
+  return out;
+}
+
+/** 把 $VAR / ${VAR} 前缀换成已解出的字面量；解不出返回原样（后续判据会拒） */
+function resolveVar(raw, vars) {
+  const m = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(.*)$/.exec(raw);
+  if (!m) return raw;
+  const v = vars[m[1]];
+  return v ? v + m[2] : raw;
+}
+
 function tokens(seg) {
   return seg.split(/\s+/).filter(Boolean);
 }
@@ -134,8 +171,8 @@ const TIER0_ROOTS = new Set([
  * 递归强删的单个目标判据。返回拒绝理由，或 undefined 表示放行。
  * 分三档：根部/变量/通配 ⇒ 拒；可抛弃区内的具名子项 ⇒ 放；其余 ⇒ 拒并给隔离区路标。
  */
-function rmTargetVerdict(target, disposeAllow) {
-  const raw = String(target).replace(/^['"]|['"]$/g, "");
+function rmTargetVerdict(target, disposeAllow, vars = {}) {
+  const raw = resolveVar(String(target).replace(/^['"]|['"]$/g, ""), vars);
   if (!raw) return "`rm -rf` 目标为空，拒绝。";
   if (/[$`]/.test(raw)) {
     return "Never 级：`rm -rf $VAR` 变量未校验即禁。先 `echo \"$VAR\"` 核对展开后的绝对路径，确认是本次产生的路径，再逐个点名删除（R-03 / R-12）。";
@@ -161,7 +198,7 @@ function rmTargetVerdict(target, disposeAllow) {
 }
 
 /** R-03：破坏性动词。返回路标理由，或 undefined */
-function destructive(seg, disposeAllow = []) {
+function destructive(seg, disposeAllow = [], vars = {}) {
   const exe = argv0(seg);
   const tk = tokens(seg);
   const fl = flagsOf(seg);
@@ -174,7 +211,7 @@ function destructive(seg, disposeAllow = []) {
       const targets = parseArgv(seg).rest.filter((t) => !t.startsWith("-"));
       if (!targets.length) return "`rm -rf` 未给目标：拒绝（R-03）。";
       for (const target of targets) {
-        const verdict = rmTargetVerdict(target, disposeAllow);
+        const verdict = rmTargetVerdict(target, disposeAllow, vars);
         if (verdict) return verdict;
       }
       return undefined; // 全部落在可抛弃区 / 当前目录具名项 ⇒ 放行
@@ -182,8 +219,8 @@ function destructive(seg, disposeAllow = []) {
   }
 
   if (exe === "find" && (tk.includes("-delete") || (tk.includes("-exec") && tk.some((t) => /^(rm|unlink)$/.test(t))))) {
-    const root = parseArgv(seg).rest.find((t) => !t.startsWith("-")) || "";
-    const absRoot = root.startsWith("~") ? expand(root) : root;
+    const root = (parseArgv(seg).rest.find((t) => !t.startsWith("-")) || "").replace(/^['"]|['"]$/g, "");
+    const absRoot = expand(resolveVar(root, vars));
     if (absRoot.startsWith("/") && disposeAllow.some((r) => absRoot !== r && under(absRoot, [r]))) return undefined;
     return "破坏性动词需逐命令批准：`find … -delete` / `-exec rm` 等同递归强删。把搜索根限定在可抛弃区可直接放行；否则先列出将被删的清单交用户核对（R-03 / R-12）。";
   }
@@ -251,7 +288,7 @@ function selfMatch(seg) {
   const exe = argv0(seg);
   const tk = tokens(seg);
   if (exe === "pkill" && (tk.includes("-f") || tk.includes("--full"))) {
-    return "`pkill -f` 匹配所有进程的完整命令行，包括运行这条命令的 shell 自己 → 会杀掉你自己的载体。改用 `pidof <可执行名>` 判在不在，再用精确 PID 杀（先 `ps -o pid,ppid,cmd -p <PID>` 核对）（R-07）。";
+    return "`pkill -f` 匹配所有进程的完整命令行，包括运行这条命令的 shell 自己 → 会杀掉你自己的载体。三步替代（照抄）：① `pidof <可执行名>` 看在不在  ② `ps -o pid,ppid,cmd -p <PID>` 核对是不是目标  ③ `kill <PID>`。确需按命令行过滤时用带 comm 白名单的形态（不要用 pkill）：`pgrep -f <模式> | while read p; do [ \"$(ps -o comm= -p $p)\" = <名字> ] && kill \"$p\"; done`（R-07）。";
   }
   if (/\bpgrep\s+-[a-z]*f\b/.test(seg) && /\buntil\b/.test(seg)) {
     return "`until ! pgrep -f …; do …; done` 永不退出：pgrep 匹配到调用它的 shell 自己。改用 `pidof` 或 PID 文件（R-07）。";
@@ -454,6 +491,7 @@ export function apply(ctx, config = {}) {
   const exempt_prefix = cfg.snapshotExempt.map(expand);
 
   try { mkdir(logFile.replace(/\/[^/]*$/, ""), { recursive: true }); } catch { /* 目录已存在 */ }
+  try { chmodSync(logFile, 0o600); } catch { /* 文件还不存在就等第一次写 */ }
 
   const log = (line) => {
     appendFile(logFile, `${new Date().toISOString()} ${line}\n`, () => {}); // 异步 fire-and-forget
@@ -510,7 +548,8 @@ export function apply(ctx, config = {}) {
       for (const s of segs) { const r = bypass(s); if (r) return r; }
     }
     if (cfg.denyDestructive !== false) {
-      for (const s of segs) { const r = destructive(s, disposeAllow); if (r) return r; }
+      const vars = collectVars(cmd);
+    for (const s of segs) { const r = destructive(s, disposeAllow, vars); if (r) return r; }
     }
     return undefined;
   };
@@ -519,7 +558,7 @@ export function apply(ctx, config = {}) {
   const dispose = ctx.tools.guard((exec) => {
     try {
       const reason = check(exec);
-      if (reason) log(`DENY tool=${exec?.name} reason="${reason.slice(0, 90)}…" cmd=${String(exec?.arguments?.command ?? exec?.arguments?.script ?? "").slice(0, 160)}`);
+      if (reason) log(redact(`DENY tool=${exec?.name} reason="${reason.slice(0, 90)}…" cmd=${String(exec?.arguments?.command ?? exec?.arguments?.script ?? "").slice(0, 160)}`));
       return reason;
     } catch (e) {
       log(`GUARD-ERROR tool=${exec?.name} err=${e?.message}`);
