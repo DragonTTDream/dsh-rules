@@ -2,6 +2,7 @@
 id: R-13
 title: 压缩后先复述
 layer: L0
+basis: inferred   # documented=有原始记录；inferred=日期不可考，按归档日回填
 kind: rule
 visibility: public
 since: 2026-09-23

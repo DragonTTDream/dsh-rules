@@ -2,6 +2,7 @@
 id: R-11
 title: 临时文件即清、记忆瘦身
 layer: L0
+basis: inferred   # documented=有原始记录；inferred=日期不可考，按归档日回填
 kind: preference
 visibility: public
 since: 2026-09-23

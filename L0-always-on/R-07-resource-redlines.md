@@ -2,6 +2,7 @@
 id: R-07
 title: 资源与安全红线
 layer: L0
+basis: inferred   # documented=有原始记录；inferred=日期不可考，按归档日回填
 kind: rule
 visibility: public
 since: 2026-09-23

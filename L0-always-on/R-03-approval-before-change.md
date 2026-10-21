@@ -2,6 +2,7 @@
 id: R-03
 title: 改动前拿授权
 layer: L0
+basis: documented   # documented=有原始记录；inferred=日期不可考，按归档日回填
 kind: rule
 visibility: public
 since: 2026-10-03

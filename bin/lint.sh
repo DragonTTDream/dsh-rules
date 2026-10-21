@@ -77,9 +77,9 @@ for f in L0-always-on/R-*.md; do
   # 7c kind 只能是 rule / preference
   kd=$(awk -F': *' '/^kind:/{print $2; exit}' "$f")
   case "$kd" in rule|preference) : ;; *) bad "$f: kind 必须是 rule 或 preference（当前: ${kd:-空}）" ;; esac
-  # 7d 上下文税闸门：单条 ≥30 行就该拆分或下沉
-  lines=$(wc -l < "$f")
-  [ "$lines" -le 30 ] || say "WARN" "$f: $lines 行，超过 30 行闸门（考虑拆分或下沉）"
+  # 7d 上下文税闸门：只数正文（frontmatter 不进上下文）
+  lines=$(awk 'BEGIN{n=0} /^---$/{n++; next} n>=2' "$f" | grep -c . || true)
+  [ "$lines" -le 30 ] || say "WARN" "$f: 正文 $lines 行，超过 30 行闸门（考虑拆分或下沉）"
 done
 
 # ── 8. 插件 README 四节齐全（把"文档该写什么"从口头纪律变成检查）──────
@@ -87,6 +87,25 @@ for f in L4-plugins/*/README.md; do
   [ -f "$f" ] || continue
   for sec in 注入点 失效症状 配置 恢复配方 依赖; do
     grep -q "## $sec" "$f" || bad "$f: 缺一节「$sec」（模板见 templates/_plugin-readme.md）"
+  done
+done
+
+# ── 9. 元数据诚实性 + 上下文预算闸门 ────────────────────────────────
+for f in L0-always-on/R-*.md; do
+  [ -f "$f" ] || continue
+  bs=$(awk -F': *' '/^basis:/{print $2; exit}' "$f" | awk '{print $1}')
+  case "$bs" in documented|inferred) : ;; *) bad "$f: basis 必须是 documented 或 inferred（当前: ${bs:-空}）" ;; esac
+done
+# L0 合成后每轮都付 ⇒ 对合成产物设闸门（14 KB ≈ 4.5k token）
+total=$(bash "$ROOT/bin/assemble.sh" | wc -c)
+[ "$total" -le 14336 ] || bad "L0 合成后 ${total} 字节，超过 14336 字节闸门（每轮上下文税）"
+
+# ── 10. 技能 frontmatter 三字段（skill-authoring 的标准，现在由机器查）──
+for f in L2-skills/*/SKILL.md; do
+  [ -f "$f" ] || continue
+  head -1 "$f" | grep -qx -- '---' || { bad "$f: 首行必须是 ---"; continue; }
+  for k in name description whenToUse; do
+    grep -qE "^${k}:" "$f" || bad "$f: 缺 frontmatter 字段 $k"
   done
 done
 

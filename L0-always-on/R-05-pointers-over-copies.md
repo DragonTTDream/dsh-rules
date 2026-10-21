@@ -2,6 +2,7 @@
 id: R-05
 title: 跨范围只放指针
 layer: L0
+basis: inferred   # documented=有原始记录；inferred=日期不可考，按归档日回填
 kind: rule
 visibility: public
 since: 2026-09-23
