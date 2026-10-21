@@ -481,6 +481,10 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
         properties: {
           marker: { type: "string", required: true, description: "脚本写出的 marker；空串表示没等到。" },
+          reason: { type: "string", required: true, description: "marker | marker-late | script-died | no-start | stall | timeout" },
+          died: { type: "boolean", required: true, description: "进程退出却没写 marker" },
+          stall: { type: "boolean", required: true, description: "进程活着但日志静默" },
+          quietSec: { type: "number", required: true, description: "日志静默了多少秒" },
           timedOut: { type: "boolean", required: true },
           elapsedSec: { type: "number", required: true },
           unloadOk: { type: "boolean", required: true },
