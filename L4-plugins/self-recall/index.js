@@ -10,9 +10,11 @@
 
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
-import { mkdir, writeFile, access, unlink, readFile } from "node:fs/promises";
+import { mkdir, writeFile, access, unlink, readFile, appendFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -42,6 +44,9 @@ export const Config = z.object({
   pendingScanMs: z.number().min(5000).step(1000),
   failFastSec: z.number().min(0).step(1),
   stallMinutes: z.number().min(0).step(1),
+  attemptBudget: z.number().min(0).step(1),
+  circuitAfter: z.number().min(0).step(1),
+  ledgerPath: z.string(),
   shipSkill: z.boolean(),
   auxModels: z.array(z.string()),
   localModels: z.array(z.string()),
@@ -66,7 +71,13 @@ const DEFAULTS = {
   warmOnlyLocalSession: true,
   pendingScanMs: 20000,
   failFastSec: 8,      // 进程没了且无 marker ⇒ 8 秒判失败（下限 3）
-  stallMinutes: 10,   // 日志静默 N 分钟判空转（0 = 关）
+  stallMinutes: 10,
+  // 重跑治理（2026-10-22，替代"硬拒同一脚本"）：按失败类型决定能不能重跑，
+  // 而不是按"脚本有没有变"硬拦。依据 Temporal 的 transient/intermittent/permanent 三分
+  // + Google SRE 的尝试预算 + Reflexion 的"重试要带自我批判"。
+  attemptBudget: 2,      // 同一脚本（intermittent 类）最多尝试次数，0 = 不限
+  circuitAfter: 3,       // 连续 N 次同因失败 ⇒ 熔断，要求换方法
+  ledgerPath: "~/.dsh/arbitrate/attempts.jsonl",   // 日志静默 N 分钟判空转（0 = 关）
   auxModels: [],
   localModels: [],
 };
@@ -192,6 +203,42 @@ export function jobAlive(dir) {
  * 优先级（越靠前越可信）：marker > 进程已死 > 到 cap > 日志静默。
  * 依据（2026-10-22）：旧实现只认 marker ⇒ 脚本早失败或压根没起来都要干等到 cap。
  */
+
+const PERMANENT_HINTS = [
+  /syntax error/i, /command not found/i, /no such file/i, /cannot open/i,
+  /permission denied/i, /unbound variable/i, /bad substitution/i, /cannot execute/i,
+];
+
+/** 失败三分（Temporal 口径）。判 permanent 必须有日志证据，不凭 reason 猜。 */
+export function classifyFailure(reason = "", logTail = "") {
+  if (reason === "no-start" || reason === "script-died") {
+    return PERMANENT_HINTS.some((re) => re.test(String(logTail))) ? "permanent" : "transient";
+  }
+  if (reason === "stall" || reason === "timeout") return "intermittent";
+  return "transient"; // marker / marker-late / 中断 / 空 → 按 transient
+}
+
+/**
+ * 能不能再跑一次（纯函数，可单测）。
+ *   transient    ⇒ 直接放行（宿主重启、模型卸载这类，原样重跑是对的）
+ *   permanent    ⇒ 拒，并把上次的错误行还给它（重跑无意义）
+ *   intermittent ⇒ 要 change（"上次为什么失败 + 这次改了什么"）+ 预算内
+ */
+export function decideRerun({ prev = null, change = "", attemptBudget = 2, circuitAfter = 3, sameReasonStreak = 0 } = {}) {
+  if (!prev) return { action: "allow", why: "first-run", cls: "none" };
+  const cls = classifyFailure(prev.reason, prev.logTailTail || "");
+  if (cls === "transient") return { action: "allow", why: "transient", cls };
+  if (cls === "permanent") return { action: "deny", why: "permanent", cls };
+  if (Number(circuitAfter) > 0 && Number(sameReasonStreak) >= Number(circuitAfter)) {
+    return { action: "deny", why: "circuit-open", cls };
+  }
+  if (Number(attemptBudget) > 0 && Number(prev.attempt || 1) >= Number(attemptBudget)) {
+    return { action: "deny", why: "budget-exhausted", cls };
+  }
+  if (!String(change || "").trim()) return { action: "deny", why: "need-change", cls };
+  return { action: "allow", why: "intermittent+change", cls };
+}
+
 export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 0, elapsed = 0, failFast = 8, stallMin = 10, cap = 900 } = {}) {
   if (marker) return { done: true, reason: "marker" };
   const ff = Math.max(Number(failFast) || 0, 3);
@@ -200,6 +247,24 @@ export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 
   const sm = Number(stallMin) || 0;
   if (sm > 0 && quietSec >= sm * 60) return { done: true, reason: "stall" };
   return { done: false, reason: "" };
+}
+
+
+function ledgerFile(cfg) {
+  const p = String(cfg.ledgerPath || "~/.dsh/arbitrate/attempts.jsonl");
+  return p.startsWith("~") ? join(homedir(), p.slice(1).replace(/^\//, "")) : p;
+}
+
+async function readLedger(file) {
+  try {
+    const t = await readFile(file, "utf8");
+    return t.split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+}
+
+async function appendLedger(file, entry) {
+  try { await mkdir(dirname(file), { recursive: true }); await appendFile(file, JSON.stringify(entry) + "\n", "utf8"); }
+  catch { /* 台账失败不影响主流程 */ }
 }
 
 export function markerIn(file) {
@@ -418,6 +483,7 @@ export function apply(ctx, config = {}) {
         "- 提交这类任务只用 `arbitrate_run`：卸载模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。**`timeoutSec` 硬上限 900 秒**（超出会被插件压到 900，返回体 `capSec` 告诉你实际值）：更长的活拆窗，每窗留一个中间 marker。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回，无需用户发起对话。**装卸对象 = 本会话当前用的那个本地模型**（按会话路由解析，`config.localModels` 内任一命中即用；跟随你会话里选的纯文本/弹性条目，不写死一条）。",
         "- `arbitrate_run` 在 marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型（返回 `warmMs`/`warmOk`），provider 装载的 30–45 秒吃在工具调用里，用户下一条消息直接命中热模型；连续跑重活时传 `warm:false` 省这段时间。",
         "- **待回归兜底（插件保证，不靠自觉，四层闭环）**：`arbitrate_run` 卸载成功即落盘 pending 标记。**① 任务脚本自带回归**（插件在脚本头部注入 EXIT trap：任务一退出就卸 auxModels 并发 1 token 装回主模型，与 harness 是否放弃这次调用无关）；**② 插件定时器**每 `pendingScanMs` 毫秒检查 pending，任务进程已退出就补 warm（会话空闲无请求也照跑）；**③ 回合开始前**（`agent/pre-step`）检查 pending 补 warm；**④ 超时分支**补判迟到 marker 与任务进程状态。**任务进程还在跑时四层全部绝不装回**（串行独占不破）。`arbitrate_warm` 成功也会清掉标记。",
+        "- **重跑治理（插件侧，按失败类型判）**：首次直接跑；上次是 stall/timeout（intermittent）⇒ 必须填 change（一句「上次为什么失败 + 这次改了什么」），且在同脚本 attemptBudget 次预算内；上次 script-died/no-start 且日志里有 syntax error / No such file / permission denied（permanent）⇒ 拒绝重跑，返回体直接给出上次错误行；宿主重启或中断类（transient）⇒ 原样放行。返回体的 previous/attempt/rerunWhy 说明它为什么允许或拒绝。",
         "- 任务脚本必须写 marker（成功和失败都要写，格式 `marker=<值>`）。**早退三态**：`script-died`（进程退了没写 marker）/ `no-start`（压根没起来）/ `stall`（活着但日志静默 `stallMinutes`）——都不再干等到超时；返回体的 `reason`/`died`/`stall`/`quietSec` 会告诉你是哪种。**脚本不要 `exec` 重定向自己的 stdout** —— 插件已把 stdout 接进 job.log，抢走 stdout 会让 marker 永远读不到（2026-10-14 实测踩过）。",
         `- 跑重活前后用 \`arbitrate_status\` 看红线：MemAvailable ≥${freeGB}GB 自由跑；≥${floorGB}GB 降级并不碰模型；低于它才卸载。始终为用户保留 ≥${floorGB}GB 轻量办公余量。`,
         "- 绝不杀 provider 的装载子进程/进程组，也不要杀宿主进程与用户浏览器——那会掐断召回链，会话将无法自动恢复。",
@@ -487,10 +553,11 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_run",
-    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
+    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**重跑治理**：同一脚本再提交时，插件带上上次结果（`previous`），按失败类型三分（transient 放行 / intermittent 要 `change` 且限 `attemptBudget` 次 / permanent 直接拒）；连续 `circuitAfter` 次同因失败熔断，要求换方法。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
     parameters: {
       script: { type: "string", required: true, description: "要执行的 bash 脚本内容。约定：结束时 echo 'marker=<值>'。" },
       label: { type: "string", description: "短标签，用于命名工作目录（默认 job）。" },
+      change: { type: "string", description: "重跑时必须填：上次为什么失败 + 这次改了什么（一行）。首次提交可省略。transient 类失败不要求。" },
       timeoutSec: { type: "number", description: "最长等待秒数，默认 900，**上限 900（超出会被压到 900）**。更长的活拆窗。" },
       unload: { type: "boolean", description: "是否先卸载模型，默认 true。" },
       warm: { type: "boolean", description: "任务结束后是否自动回归并预热：先按「谁卸谁」卸掉 config.auxModels，再发 1 token 请求触发 provider 装载，把装载耗时吃在本工具调用里。默认取 config.warmAfterRun；马上还要接着跑重活时传 false。" },
@@ -503,6 +570,10 @@ export function apply(ctx, config = {}) {
           marker: { type: "string", required: true, description: "脚本写出的 marker；空串表示没等到。" },
           reason: { type: "string", required: true, description: "marker | marker-late | script-died | no-start | stall | timeout" },
           capSec: { type: "number", required: true, description: "本次实际生效的等待上限（硬上限 900）" },
+          previous: { type: "string", required: true, description: "同一脚本上一次尝试的 JSON（空串 = 首次）。含 reason/marker/workdir/logTail" },
+          attempt: { type: "number", required: true, description: "同一脚本的第几次尝试" },
+          rerunDenied: { type: "boolean", required: true, description: "true = 本次因重跑治理被拒，未启动" },
+          rerunWhy: { type: "string", required: true, description: "first-run | transient | intermittent+change | permanent | budget-exhausted | circuit-open | need-change" },
           died: { type: "boolean", required: true, description: "进程退出却没写 marker" },
           stall: { type: "boolean", required: true, description: "进程活着但日志静默" },
           quietSec: { type: "number", required: true, description: "日志静默了多少秒" },
@@ -529,6 +600,34 @@ export function apply(ctx, config = {}) {
       const dir = join(tmpdir(), `arbitrate-${tag}-${Date.now()}`);
       await mkdir(dir, { recursive: true });
       const before = await memInfo();
+      // ── 重跑治理：同脚本的历史尝试（台账）→ 按失败类型决定 ──────────────
+      const scriptBody = typeof script === "string" ? script : "";
+      const scriptHash = createHash("sha256").update(scriptBody).digest("hex").slice(0, 16);
+      const lfile = ledgerFile(cfg);
+      const mine = (await readLedger(lfile)).filter((e) => e && e.hash === scriptHash);
+      const prev = mine.length ? mine[mine.length - 1] : null;
+      const attempt = mine.length + 1;
+      let streak = 0;
+      for (let i = mine.length - 1; i >= 0; i -= 1) { if (mine[i].reason === (prev && prev.reason)) streak += 1; else break; }
+      const decision = decideRerun({
+        prev, change, attemptBudget: Number(cfg.attemptBudget) || 0,
+        circuitAfter: Number(cfg.circuitAfter) || 0, sameReasonStreak: streak,
+      });
+      if (decision.action === "deny") {
+        const prevJson = prev ? JSON.stringify({
+          at: new Date(prev.at || 0).toISOString(), reason: prev.reason, marker: prev.marker,
+          quietSec: prev.quietSec, attempt: prev.attempt, workdir: prev.workdir,
+          logTail: String(prev.logTailTail || "").slice(-600),
+        }) : "";
+        return {
+          marker: "", reason: "rerun-denied", capSec: cap, died: false, stall: false, timedOut: false,
+          quietSec: 0, previous: prevJson, attempt, rerunDenied: true, rerunWhy: decision.why,
+          elapsedSec: 0, unloadOk: true, unloadBody: "skipped(重跑被拒，未卸载模型)",
+          memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
+          logTail: String((prev && prev.logTailTail) || ""), workdir: String((prev && prev.workdir) || ""),
+          warmMs: 0, warmOk: false,
+        };
+      }
       // 卸谁（2026-10-16）：会话命中的本地模型 → 否则端点正在跑的本地模型 → 否则 config.model。不再写死 cfg.model。
       const target = await unloadTarget(cfg);
       const un = unload === false ? { ok: true, body: "skipped" } : await unloadModel({ ...cfg, model: target });
@@ -622,11 +721,20 @@ export function apply(ctx, config = {}) {
         if (late !== "" || !jobAlive(dir)) wr = await warmNow("timeout+job-done");
         else log?.warn?.("self-recall: 超时且任务仍在跑 ⇒ 不装回，pending 交由 agent/pre-step 兜底");
       }
+      await appendLedger(lfile, {
+        hash: scriptHash, label: tag, at: Date.now(), reason, marker, quietSec,
+        elapsedSec: Math.round((Date.now() - t0) / 1000), attempt,
+        logTailTail: String(tail || "").slice(-600), workdir: dir, change: String(change || "").slice(0, 300),
+      });
       const after = await memInfo();
       return {
         marker,
         reason,
         capSec: cap,
+        previous: prev ? JSON.stringify({ at: new Date(prev.at || 0).toISOString(), reason: prev.reason, attempt: prev.attempt, workdir: prev.workdir, logTail: String(prev.logTailTail || "").slice(-600) }) : "",
+        attempt,
+        rerunDenied: false,
+        rerunWhy: decision.why,
         died: reason === "script-died" || reason === "no-start",
         stall: reason === "stall",
         timedOut: reason === "timeout",

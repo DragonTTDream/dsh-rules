@@ -17,7 +17,6 @@
  *   7) 逃生口：enabled 开关 + allowPatterns 豁免正则。
  */
 
-import { createHash } from "node:crypto";
 import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -45,7 +44,6 @@ export const Config = z.object({
   nudgeDelegationAfterReads: z.number(),
   nudgeTodoAfterMinutes: z.number(),
   denyBackgroundSubagent: z.boolean(),
-  denyDuplicateScript: z.boolean(),
   snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -98,10 +96,6 @@ const DEFAULTS = {
   // 单序列引擎上，后台子代理会与主对话抢同一条推理序列。
   // 实测（2026-10-21）：子代理 21:14:52–21:18:52 在跑，父会话同时又发了 3 步。
   denyBackgroundSubagent: true,
-  // 同一段脚本在本会话内第二次提交 ⇒ 拒一次（R-14：失败/超时后先取证，不是再跑一次）
-  // 依据：2026-10-22 实测，arbitrate_run 超时后模型在 40 分钟内重跑两次，
-  //   始终没打开那份一直在写的进度日志。
-  denyDuplicateScript: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   // 宿主消费集：运行中的服务 / profile 启动时加载 / 每步注入的指令
   snapshotTargets: [
@@ -515,7 +509,6 @@ export function apply(ctx, config = {}) {
   let readSinceDelegate = 0;
   let bashSinceTodo = 0;
   let lastTodoAt = Date.now();
-  const seenScripts = new Set();
   const READS = Number(cfg.nudgeDelegationAfterReads) || 0;
   const TODO_MIN = Number(cfg.nudgeTodoAfterMinutes) || 0;
   // 只认"读放大"型命令：它们才真的会往上下文灌体积
@@ -584,22 +577,6 @@ export function apply(ctx, config = {}) {
           "子代理在后台跑时主对话每发一步都要和它抢同一条序列、双方互相逐出前缀。" +
           "实测：子代理跑的那 4 分钟里父会话又发了 3 步。改 `run_in_background: false` 前台等它回来——" +
           "子代理的收益是省主上下文，不是省时间（R-15）。";
-      }
-    }
-
-    // ── 同一脚本重复提交：重跑前先读上次的证据（R-14）─────────────────────
-    if (cfg.denyDuplicateScript !== false && name === "arbitrate_run") {
-      let a2 = exec?.arguments ?? {};
-      if (typeof a2 === "string") { try { a2 = JSON.parse(a2); } catch { a2 = {}; } }
-      const body = typeof a2.script === "string" ? a2.script : "";
-      if (body) {
-        const h = createHash("sha256").update(body).digest("hex");
-        if (seenScripts.has(h)) {
-          return "这段脚本本会话已经提交过一次。R-14：失败/超时/被中断后**第一动作是读它自己的证据**，" +
-            "不是再提交一次。去读：返回体的 logTail / workdir、`<workdir>/job.log`、marker、退出码。" +
-            "确认要重跑时**改一处**（注释 / label / 超时）再提交 —— 那是「我看过上次结果」的凭证。";
-        }
-        seenScripts.add(h);
       }
     }
 
