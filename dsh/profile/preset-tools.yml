@@ -60,6 +60,10 @@
   config:
     - id: compaction-basic
       name: '@deepseek-ai/dsh-compaction-basic'
+      # 2026-10-22：headroomTokens 默认 65536（会变成 maxTokens）。降到 49152 ⇒ 消息预算 +16K
+      # ⇒ 压缩阈值推后 ⇒ 折叠次数减少（不改变单次摘要耗时）。
+      config:
+        headroomTokens: 49152
     - id: command-compact
       name: '@deepseek-ai/dsh-command-compact'
     - id: tool-result-pruner
