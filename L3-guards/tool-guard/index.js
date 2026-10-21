@@ -47,7 +47,8 @@ export const Config = z.object({
   denyBackgroundSubagent: z.boolean(),
   denyBackgroundSubagent: z.boolean(),
   requireUserAuthForRestart: z.boolean(),
-  denyParallelHeavy: z.boolean(),  snapshotSlot: z.string(),
+  denyParallelHeavy: z.boolean(),
+  denyAskWhileAnalyzing: z.boolean(),  snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
 });
@@ -89,6 +90,9 @@ const DEFAULTS = {
   requireUserAuthForRestart: true,
   // 本机单序列引擎：已有一个重活窗口在跑时，禁止再起 detached 重活（并行只会互相抢资源）。
   denyParallelHeavy: true,
+  // 2026-10-22 用户令：他还在分析/看方案时，模型不许把方案收敛成选择题逼他拍板
+  //（实测反例：用户正在权衡三条路，模型直接问「走哪条？」）
+  denyAskWhileAnalyzing: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   snapshotTargets: [
     "~/.dsh/profiles", "~/.dsh/skills", "~/.dsh/skillsets", "~/.dsh/AGENTS.md",
@@ -606,6 +610,25 @@ export function isRestartAuthorized(userText) {
 }
 
 /** 重启类授权闸：返回拒绝理由或 undefined。纯函数，可单测。 */
+
+const HOLD_CUE = /(先别|还没定|我先看|我看看|正在(分析|看|读|想)|不急|等我说|别急|想想再说|待定)/;
+const DECIDE_CUE = /(选哪个|你定|拍板|决定|定一下|哪个好|挑一个)/;
+const PUSHBACK = /(走哪条|选哪条|哪一条|哪个方案|选一个|挑一条|要我选|你来定)/;
+
+/** 提问该不该被拦（纯函数）。返回理由或 undefined。 */
+export function askGate({ userText = "", question = "", options = "", enabled = true } = {}) {
+  if (!enabled) return undefined;
+  const u = String(userText || "");
+  const q = `${question || ""} ${options || ""}`;
+  if (HOLD_CUE.test(u)) {
+    return `用户还在分析（本轮消息：「${u.slice(0, 80)}」）。**只给材料，不要收敛成选择题**：把取舍、后果、默认路径写清楚，按你认为最稳的那条往下做（可逆就先做），别停在这里等点头。确属信息缺口就直接问他缺什么，不要包装成选项。`;
+  }
+  if (PUSHBACK.test(q) && !DECIDE_CUE.test(u)) {
+    return "这个提问在把决定权推回去（问「走哪条/选哪个方案」而用户没让你定）。**自己排优先序**：写明每条路的代价与默认选择，然后按默认路径推进；不可逆的那一步才需要授权。";
+  }
+  return undefined;
+}
+
 export function restartGate({ cmd = "", userText = "", enabled = true } = {}) {
   if (!enabled) return undefined;
   if (!RESTART_RES.some((re) => re.test(cmd))) return undefined;
@@ -755,6 +778,14 @@ export function apply(ctx, config = {}) {
       }
     }
 
+    if (name === "ask_user_question" && cfg.denyAskWhileAnalyzing !== false) {
+      const a = exec?.arguments && typeof exec.arguments === "object" ? exec.arguments : {};
+      const qs = Array.isArray(a.questions) ? a.questions : [];
+      const qText = qs.map((x) => String((x && (x.question || x.header)) || "")).join(" ");
+      const oText = qs.map((x) => (Array.isArray(x && x.options) ? x.options.map((o) => String((o && o.label) || "")).join(" ") : "")).join(" ");
+      const gAsk = askGate({ userText: userTextOf(exec?.agent), question: qText, options: oText });
+      if (gAsk) return gAsk;
+    }
     if (!isShell && !isArb) { bump(name, ""); return undefined; } // 窄面（判据 2）：非 shell 只维护计数
 
     const cmd = isShell ? exec?.arguments?.command : exec?.arguments?.script;
