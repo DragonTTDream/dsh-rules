@@ -41,7 +41,7 @@ console.log("=== 委派提示：派过子代理就清零 ===");
 {
   const g = build({ nudgeDelegationAfter: 3 });
   bash(g); bash(g);
-  g({ name: "subagent", arguments: { prompt: "x" } });
+  g({ name: "subagent", arguments: { prompt: "x", run_in_background: false } });
   check(bash(g) === undefined, "派完子代理后计数清零，不会立刻弹");
 }
 

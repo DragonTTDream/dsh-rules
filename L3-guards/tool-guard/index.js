@@ -41,6 +41,7 @@ export const Config = z.object({
   maxAutoSnapshotBytes: z.number(),
   nudgeDelegationAfter: z.number(),
   nudgeTodoAfterBash: z.number(),
+  denyBackgroundSubagent: z.boolean(),
   snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -85,6 +86,9 @@ const DEFAULTS = {
   //   subagent 调用 0 次、todo_write 只 1 次 —— 提示层判据在长任务里不生效。
   nudgeDelegationAfter: 0,
   nudgeTodoAfterBash: 0,
+  // 单序列引擎上，后台子代理会与主对话抢同一条推理序列。
+  // 实测（2026-10-21）：子代理 21:14:52–21:18:52 在跑，父会话同时又发了 3 步。
+  denyBackgroundSubagent: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   // 宿主消费集：运行中的服务 / profile 启动时加载 / 每步注入的指令
   snapshotTargets: [
@@ -540,6 +544,18 @@ export function apply(ctx, config = {}) {
   const check = (exec) => {
     if (!enabled) return undefined;
     const name = exec?.name;
+    // ── 后台子代理：本机单序列 ⇒ 必须前台等 ─────────────────────────────
+    if (cfg.denyBackgroundSubagent !== false && (name === "subagent" || name === "subagent_fork")) {
+      let a = exec?.arguments ?? {};
+      if (typeof a === "string") { try { a = JSON.parse(a); } catch { a = {}; } }
+      if (a.run_in_background !== false) {
+        return "后台子代理在本机不成立：本机是单序列引擎，一次只跑一条（serve/server.py:7，在役命令行无 --batch），" +
+          "子代理在后台跑时主对话每发一步都要和它抢同一条序列、双方互相逐出前缀。" +
+          "实测：子代理跑的那 4 分钟里父会话又发了 3 步。改 `run_in_background: false` 前台等它回来——" +
+          "子代理的收益是省主上下文，不是省时间（R-15）。";
+      }
+    }
+
     const isShell = name === "bash" || name === "pwsh";
     const isArb = name === "arbitrate_run";
     const isFileWrite = name === "write" || name === "edit";
