@@ -151,8 +151,8 @@ async function loadedModels(cfg) {
   } catch { return []; }
 }
 // 重活窗口该卸谁：会话模型（在场时）→ 端点正在跑的本地模型 → 会话模型 → config.model（旧行为）
-async function unloadTarget(cfg) {
-  const t = localTarget(cfg);
+async function unloadTarget(cfg, recorded = null) {
+  const t = localTarget(cfg, recorded);
   const loaded = await loadedModels(cfg);
   const pool = localModels(cfg);
   if (t && (loaded.length === 0 || loaded.includes(t))) return t;   // 会话模型在场（或状态读不到）⇒ 就它
@@ -546,15 +546,27 @@ export function apply(ctx, config = {}) {
   let lastPendingWarm = 0;
   // 会话事实（harness 侧真值）：给模型一个「读」的入口，而不是让它凭记忆写逐字原文。
   // 依据 CaMeL（控制流/数据流分离）：授权与复述都不能来自模型自己写的字。
-  let lastFact = null;
+  // 逐会话存储：模块级单槽会让 A 会话的「最新用户消息」被 B 会话读到（2026-10-22 串台）。
+  const facts = new WeakMap();      // agent → { text, at, turn }
+  const routes = new WeakMap();     // agent → { provider, model }（跨会话不共用路由）
+  let lastFact = null;              // 取不到 agent 时的退路
   let lastTurn = 0;
   try {
     ctx.on("agent/pre-step", async (payload, next) => {
+      if (payload?.agent && payload?.route) routes.set(payload.agent, { provider: payload.route.provider, model: payload.route.model });
       const f = sessionFactFrom(payload?.messages, Date.now(), Number(payload?.turn) || 0);
-      if (f) { lastFact = f; lastTurn = f.turn; }
+      if (f) noteSessionFact(payload?.agent, f);
       return next();
     });
   } catch { /* 取不到事件就退化成 null，工具会如实说"未知" */ }
+
+  const noteSessionFact = (agent, fact) => {
+    if (!fact) return;
+    if (agent) facts.set(agent, fact);
+    lastFact = fact; lastTurn = fact.turn;
+  };
+  /** 测试用：给某会话喂一条事实。 */
+  globalThis.__selfRecallNoteFact = noteSessionFact;
 
   const disposePending = ctx.on("agent/pre-step", async (payload, next) => {
     const res = await next();
@@ -694,17 +706,18 @@ export function apply(ctx, config = {}) {
       },
       render: renderJson,
     },
-    async execute() {
-      if (!lastFact) {
-        return { known: false, text: "", atIso: "", turn: 0, note: "harness 尚未捕获到用户消息（本会话无记录或插件刚重启）" };
+    async execute(_args, exec) {
+      const mine = exec?.agent ? facts.get(exec.agent) : undefined;
+      const f = mine || null;
+      if (!f) {
+        return { known: false, text: "", atIso: "", turn: 0, note: "本会话尚未被 harness 捕获到用户消息（刚重启或还没发过言）" };
       }
-      const isNow = lastFact.turn === lastTurn;
       return {
         known: true,
-        text: lastFact.text,
-        atIso: new Date(lastFact.at).toISOString(),
-        turn: lastFact.turn,
-        note: isNow ? "本轮用户消息（逐字，harness 记录）" : "上一条用户消息（可能不是本轮）",
+        text: f.text,
+        atIso: new Date(f.at).toISOString(),
+        turn: f.turn,
+        note: "本会话的用户消息（逐字，harness 记录；按会话隔离）",
       };
     },
   })));
@@ -885,7 +898,7 @@ export function apply(ctx, config = {}) {
       },
       render: renderJson,
     },
-    async execute({ script, label, timeoutSec, unload, warm, change }) {
+    async execute({ script, label, timeoutSec, unload, warm, change }, exec) {
       // 2026-10-22 用户令：硬压 900 秒。规则「timeoutSec ≤900」变成机制，
       // 不再依赖模型自觉。更长的活必须拆窗（每次窗口留一个中间 marker）。
       const CAP_MAX_SEC = 900;
@@ -938,12 +951,13 @@ export function apply(ctx, config = {}) {
         };
       }
       // 卸谁（2026-10-16）：会话命中的本地模型 → 否则端点正在跑的本地模型 → 否则 config.model。不再写死 cfg.model。
-      const target = await unloadTarget(cfg);
+      const myRoute = (exec && exec.agent && routes.get(exec.agent)) || lastRoute;
+      const target = await unloadTarget(cfg, myRoute);
       const un = unload === false ? { ok: true, body: "skipped" } : await unloadModel({ ...cfg, model: target });
       const sh = join(dir, "job.sh");
       const out = join(dir, "job.log");
       // 只有真的卸过才欠一次回归——unload=false（同模型不卸）时模型没走，不写标记
-      if (unload !== false && cfg.pendingWarm && un.ok) await writePending({ dir, out, label: tag, model: target, route: lastRoute });
+      if (unload !== false && cfg.pendingWarm && un.ok) await writePending({ dir, out, label: tag, model: target, route: myRoute });
       // R5：把回归写进任务脚本本身（EXIT trap），任务进程脱离会话 ⇒ 与 harness 是否放弃调用无关
       const doWarmFlag = warm === false ? false : (warm === true ? true : cfg.warmAfterRun);
       const body = typeof script === "string" ? script : "";
@@ -995,7 +1009,7 @@ export function apply(ctx, config = {}) {
       let wr = { skipped: true, ms: 0, ok: false };
       const doWarm = doWarmFlag;
       const warmNow = async (why) => {
-        if (cfg.warmOnlyLocalSession && !routeIsLocal(cfg)) {
+        if (cfg.warmOnlyLocalSession && !routeIsLocal(cfg, myRoute)) {
           await clearPending();
           log?.warn?.(`self-recall: 跳过回归预热(${why}) — 调用方会话路由 "${lastRoute?.model ?? "?"}" 不在本地模型表 [${localModels(cfg).join(", ")}]`);
           // 主动跳过 ≠ 失败：报 ok:true + by 说明，避免用户在返回体里看到 warmOk:false 误判「没预热」

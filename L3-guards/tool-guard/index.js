@@ -566,11 +566,27 @@ export function latestUserText(messages) {
 }
 
 // 会中断生产的动作
-let sessionUserText = "";
+/** 本轮用户消息**按会话隔离**（2026-10-22：模块级单槽会让 A 会话的授权串到 B 会话）。 */
+const sessionTexts = new WeakMap();   // agent → { text, at }
+let fallbackUserText = "";            // 取不到 agent 时的退路（测试/极少数路径）
 
-/** 测试与插件内部用：设置「本轮用户消息」。模型无法调用 JS 函数，故不构成绕过。 */
-export function setSessionUserText(t) { sessionUserText = String(t || ""); }
-export function getSessionUserText() { return sessionUserText; }
+function userTextOf(agent) {
+  // 有 agent 就只认它自己的记录：查不到 = 没授权（绝不回落到别的会话的退路值）
+  if (agent) { const hit = sessionTexts.get(agent); return hit ? hit.text : ""; }
+  return fallbackUserText;
+}
+
+/** 记录某会话的本轮用户消息（pre-step 与测试共用；按 agent 隔离）。 */
+export function noteUserText(agent, text) {
+  const t = String(text || "");
+  if (!t) return;
+  if (agent) sessionTexts.set(agent, { text: t, at: Date.now() });
+  fallbackUserText = t;
+}
+
+/** 测试与插件内部用：设置「本轮用户消息」的默认值。模型无法调用 JS 函数，故不构成绕过。 */
+export function setSessionUserText(t) { fallbackUserText = String(t || ""); }
+export function getSessionUserText(agent) { return userTextOf(agent); }
 
 const RESTART_RES = [
   /\bsystemctl\b[^\n]*\b(restart|stop|kill)\b/,
@@ -636,11 +652,13 @@ export function apply(ctx, config = {}) {
   let readSinceDelegate = 0;
   let bashSinceTodo = 0;
   let lastTodoAt = Date.now();
-  let lastUserText = "";
   try {
     ctx?.on?.("agent/pre-step", async (payload, next) => {
       const t = latestUserText(payload?.messages);
-      if (t) { lastUserText = t; setSessionUserText(t); }   // 本轮覆盖上一轮：旧授权不得沿用
+      if (t) {
+        // 逐会话记录：别的会话说了「重启」不能给本会话授权
+        noteUserText(payload?.agent, t);
+      }
       return next();
     });
   } catch { /* 拿不到事件就退化成「无授权」 */ }
@@ -750,7 +768,7 @@ export function apply(ctx, config = {}) {
     if (whole) return whole;
 
     if (isShell) {
-      const g1 = restartGate({ cmd, userText: sessionUserText || lastUserText, enabled: cfg.requireUserAuthForRestart !== false });
+      const g1 = restartGate({ cmd, userText: userTextOf(exec?.agent), enabled: cfg.requireUserAuthForRestart !== false });
       if (g1) return g1;
       const g2 = parallelGate({ cmd, window: liveWindow(), enabled: cfg.denyParallelHeavy !== false });
       if (g2) return g2;
