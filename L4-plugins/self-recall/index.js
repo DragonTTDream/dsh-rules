@@ -688,7 +688,7 @@ export function apply(ctx, config = {}) {
       },
       render: renderJson,
     },
-    async execute({ script, label, timeoutSec, unload, warm }) {
+    async execute({ script, label, timeoutSec, unload, warm, change }) {
       // 2026-10-22 用户令：硬压 900 秒。规则「timeoutSec ≤900」变成机制，
       // 不再依赖模型自觉。更长的活必须拆窗（每次窗口留一个中间 marker）。
       const CAP_MAX_SEC = 900;
