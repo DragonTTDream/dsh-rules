@@ -1,0 +1,17 @@
+# 技能触发测试集：一句用户真实会说的话 → 应该命中哪个技能
+# 列：用户原话 <TAB> 期望命中的技能
+# 作用：① 防止两个技能的触发词互相抢 ② 改 whenToUse 后回归
+帮我改代码	code-edit-lane
+跑一下测试	code-edit-lane
+这个问题为什么一直没发现	debug-discipline
+怎么又出问题了	debug-discipline
+继续	workspace-hygiene
+产物散落在根目录了	workspace-hygiene
+把那个进程 kill 掉	process-shell-safety
+这个技能太啰嗦了	skill-authoring
+写个技能	skill-authoring
+分析一下这只股票	stock-analysis-report
+提个 PR	github-axi
+今天吃什么	chef
+把这个视频转写一下	video-transcribe-pipeline
+ComfyUI 工作流加载报错	comfyui-workflow-safety

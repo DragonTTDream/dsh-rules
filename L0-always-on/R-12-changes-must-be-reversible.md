@@ -10,6 +10,9 @@ why: 改了正在运行的服务消费的配置文件，改坏了只能让用户
 evidence: incidents/INC-2026-09-23-broke-host-service.md
 judge: 这个操作失败后，怎么回到动手前？答不出 ⇒ 不动手
 enforced_by: [prompt, guard]
+conflicts_with: [R-03]
+resolution: 见 R-03 的 resolution（两侧必须写同一套判据）。
+
 ---
 
 ## 规则

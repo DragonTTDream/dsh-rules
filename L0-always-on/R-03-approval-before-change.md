@@ -10,6 +10,10 @@ why: 模型把"取消两个变体"理解成"把那套配置也一并撤下登记
 evidence: incidents/INC-2026-10-03-overreach.md
 judge: 本次改动能否指到一条真实用户消息？指不到就不动
 enforced_by: [prompt]
+conflicts_with: [R-12]
+resolution: 常规改动 R-03 优先（先说后动）；**已经发生的失败/事故**场景 R-12 优先
+  （当场自动回退，不必等点头），回退完成、复验绿了之后立刻报告。
+
 ---
 
 ## 规则
