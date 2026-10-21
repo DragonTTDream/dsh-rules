@@ -17,7 +17,7 @@
  *   7) 逃生口：enabled 开关 + allowPatterns 豁免正则。
  */
 
-import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, statSync } from "node:fs";
+import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -44,7 +44,9 @@ export const Config = z.object({
   nudgeDelegationAfterReads: z.number(),
   nudgeTodoAfterMinutes: z.number(),
   denyBackgroundSubagent: z.boolean(),
-  snapshotSlot: z.string(),
+  denyBackgroundSubagent: z.boolean(),
+  requireUserAuthForRestart: z.boolean(),
+  denyParallelHeavy: z.boolean(),  snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
 });
@@ -66,54 +68,33 @@ const DEFAULTS = {
   enabled: true,
   logFile: "~/.dsh/tool-guard.log",
   allowPatterns: [],
-  // 可抛弃区：这些根下面的具名子项允许直接递归强删，不问。
-  // 只打算删"自己刚建的临时目录"的人不该被拦（实测 190 次拒绝里 46 次是这类）。
-  // 根本身（/tmp、/var/tmp）不在此列：整根强删仍然拒。
   disposeAllow: [],
-  hostServices: [],   // 填你自己宿主服务的名字，如 ["app.service"]
+  hostServices: ["dsh-web.service"],
   denyDestructive: true,
   denyBypass: true,
   denyPkillF: true,
   denyRestartWithBackground: true,
   denyRestartInScript: true,
   requireSnapshot: true,
-  // 自动快照：写入宿主消费集时，目标若是「小文件」就当场拍一张再放行，
-  // 而不是拒掉让模型再跑一次 snap.sh。
-  // 依据：97 次闸门拒绝里 52 次的目标是文件（最大 36 KB），逐次人肉拍快照纯属流程税。
-  // 只对已存在的普通文件生效；目录、超大文件、不存在的路径仍走拒绝 + 路标。
-  autoSnapshot: false,
+  autoSnapshot: true,
   maxAutoSnapshotBytes: 8388608,
-  // 软提示（deny-once-then-reset）：0 = 关。
-  // 依据：2026-10-21 实测一次 42 分钟会话，bash 97 次灌进 681 KB 工具结果、
-  //   subagent 调用 0 次、todo_write 只 1 次 —— 提示层判据在长任务里不生效。
   nudgeDelegationAfter: 0,
   nudgeTodoAfterBash: 0,
-  // 2026-10-21 修正：按"调用次数"计会误伤正常实现流（实测两次命中都是编辑/跑脚本，
-  //   模型为了消提示而硬派子代理 = 指标驱动）。改成只数**读类命令**。
-  nudgeDelegationAfterReads: 0,
-  // 卡片提示改时间驱动：距上次 todo_write 超过 N 分钟才提示
-  nudgeTodoAfterMinutes: 0,
-  // 单序列引擎上，后台子代理会与主对话抢同一条推理序列。
-  // 实测（2026-10-21）：子代理 21:14:52–21:18:52 在跑，父会话同时又发了 3 步。
+  nudgeDelegationAfterReads: 12,
+  nudgeTodoAfterMinutes: 20,
   denyBackgroundSubagent: true,
+  // 2026-10-22 用户令：重启等会中断生产的动作，必须由**本轮用户消息**明确授权。
+  // 起因：我把某轮一次的"改完直接重启"当成常驻授权，一晚重启宿主 7–8 次。
+  requireUserAuthForRestart: true,
+  // 本机单序列引擎：已有一个重活窗口在跑时，禁止再起 detached 重活（并行只会互相抢资源）。
+  denyParallelHeavy: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
-  // 宿主消费集：运行中的服务 / profile 启动时加载 / 每步注入的指令
   snapshotTargets: [
-    "~/.dsh/profiles",
-    "~/.dsh/skills",
-    "~/.dsh/skillsets",
-    "~/.dsh/AGENTS.md",
-    "~/.config/systemd/user",
-    // 你自研插件的代码目录也加进来（改它们等于改宿主行为）
-    // "~/my-plugin",
+    "~/.dsh/profiles", "~/.dsh/skills", "~/.dsh/skillsets", "~/.dsh/AGENTS.md",
+    "~/.config/systemd/user", "/home/loong/.local/lib/node_modules/@deepseek-ai",
+    "/home/loong/dsh-self-recall", "/home/loong/dsh-vision-forward", "/home/loong/dsh-tool-guard",
   ],
-  // 豁免：快照位自身 / 临时区 / 工作区文档 / 防线自己的日志
-  snapshotExempt: [
-    "~/.dsh/snapshots",
-    "~/.dsh/tool-guard.log",
-    "/tmp",
-    "~/workspace",   // 换成你自己不受宿主消费的目录
-  ],
+  snapshotExempt: ["~/.dsh/snapshots", "~/.dsh/tool-guard.log", "/tmp", "/home/loong/文档"],
 };
 
 /** 拆段：堵「换行后藏命令」与链式操作符 */
@@ -495,6 +476,81 @@ export function shellWriteTargets(cmd) {
   return out;
 }
 
+
+// ── 本轮用户消息捕获（agent/pre-step 的载荷带 messages）──────────────────
+export function messageText(m) {
+  if (!m) return "";
+  const c = m.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map((x) => (typeof x === "string" ? x : x?.text ?? "")).join(" ");
+  return "";
+}
+
+export function latestUserText(messages) {
+  if (!Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if ((messages[i]?.role || "") === "user") return messageText(messages[i]).slice(0, 2000);
+  }
+  return "";
+}
+
+// 会中断生产的动作
+let sessionUserText = "";
+
+/** 测试与插件内部用：设置「本轮用户消息」。模型无法调用 JS 函数，故不构成绕过。 */
+export function setSessionUserText(t) { sessionUserText = String(t || ""); }
+export function getSessionUserText() { return sessionUserText; }
+
+const RESTART_RES = [
+  /\bsystemctl\b[^\n]*\b(restart|stop|kill)\b/,
+  /\bservice\b[^\n]*\b(restart|stop)\b/,
+  /\bsystemd-run\b[^\n]*\brestart\b/,
+  /\b(kill|pkill|killall)\b[^\n]*(dsh-web|llama-swap|llama\.cpp|server\.py|engine)/,
+];
+const AUTH_RES = [/重启/, /\brestart\b/i, /停(掉|止)?服务/, /掐断/, /授权/, /可以(杀|停|重启)/, /都批准/];
+const NEG_RES = [/(不要|别|不用|先别|暂不|禁止|不许)[^\n]{0,8}(重启|restart|停|杀)/i];
+
+/** 本轮用户消息是否明确授权重启/中断生产。否定句优先（"不要重启" 不算授权）。 */
+export function isRestartAuthorized(userText) {
+  const t = String(userText || "");
+  if (!t.trim()) return false;
+  if (NEG_RES.some((re) => re.test(t))) return false;
+  return AUTH_RES.some((re) => re.test(t));
+}
+
+/** 重启类授权闸：返回拒绝理由或 undefined。纯函数，可单测。 */
+export function restartGate({ cmd = "", userText = "", enabled = true } = {}) {
+  if (!enabled) return undefined;
+  if (!RESTART_RES.some((re) => re.test(cmd))) return undefined;
+  if (isRestartAuthorized(userText)) return undefined;
+  const echo = userText ? `最新一条用户消息（逐字）：${JSON.stringify(userText.slice(0, 300))}` : "最新一条用户消息：本回合取不到（pre-step 未捕获）";
+  return `【需要用户授权】这条命令会重启/中断正在运行的服务，守卫要求「本轮用户消息里明确授权」。${echo} —— 里面没有重启/授权之意 ⇒ 不得执行。先说明重启什么、为什么、怎么回退，等用户回话（R-03/R-12）。`;
+}
+
+function lockFile() {
+  return `${process.env.HOME || "/home/loong"}/.dsh/arbitrate/window.lock`;
+}
+
+/** 读窗口锁：pid 还活着才算「有窗口在跑」，否则视为陈旧。 */
+export function liveWindow(path = lockFile()) {
+  try {
+    const j = JSON.parse(readFileSync(path, "utf8"));
+    const pid = Number(j?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    try { process.kill(pid, 0); } catch { return null; }   // 进程已死 ⇒ 陈旧
+    return { pid, label: String(j?.label || ""), at: Number(j?.at || 0) };
+  } catch { return null; }
+}
+
+const DETACHED_RE = /\b(setsid|nohup|disown)\b|(^|\s)&(\s|$)/;
+
+/** 并行闸：已有活窗口时，禁止再起 detached 重活。纯函数，可单测。 */
+export function parallelGate({ cmd = "", window = null, enabled = true } = {}) {
+  if (!enabled || !window) return undefined;
+  if (!DETACHED_RE.test(cmd)) return undefined;
+  return `【本机单序列】已有一个重活窗口在跑（${window.label || "未标注"} pid=${window.pid}）。并行第二个窗口只会互相抢显存/内存，不会更快——本机只有一条推理序列。先等它结束（或看 arbitrate_status），再起下一个。`;
+}
+
 export function apply(ctx, config = {}) {
   const cfg = { ...DEFAULTS, ...config };
   const logFile = expand(cfg.logFile);
@@ -509,6 +565,14 @@ export function apply(ctx, config = {}) {
   let readSinceDelegate = 0;
   let bashSinceTodo = 0;
   let lastTodoAt = Date.now();
+  let lastUserText = "";
+  try {
+    ctx?.on?.("agent/pre-step", async (payload, next) => {
+      const t = latestUserText(payload?.messages);
+      if (t) { lastUserText = t; setSessionUserText(t); }   // 本轮覆盖上一轮：旧授权不得沿用
+      return next();
+    });
+  } catch { /* 拿不到事件就退化成「无授权」 */ }
   const READS = Number(cfg.nudgeDelegationAfterReads) || 0;
   const TODO_MIN = Number(cfg.nudgeTodoAfterMinutes) || 0;
   // 只认"读放大"型命令：它们才真的会往上下文灌体积
@@ -614,6 +678,12 @@ export function apply(ctx, config = {}) {
     const whole = wholeCommand(cmd);
     if (whole) return whole;
 
+    if (isShell) {
+      const g1 = restartGate({ cmd, userText: sessionUserText || lastUserText, enabled: cfg.requireUserAuthForRestart !== false });
+      if (g1) return g1;
+      const g2 = parallelGate({ cmd, window: liveWindow(), enabled: cfg.denyParallelHeavy !== false });
+      if (g2) return g2;
+    }
     if (cfg.denyRestartInScript !== false && isArb && services.some((s) => new RegExp(`\\brestart\\b[^\\n]*${s}`).test(cmd))) {
       return "arbitrate_run 的脚本里含宿主重启：脚本会随会话载体被回收，marker 永远读不到。把重启拆成独立调用（③ 之后单独重启），脚本里不要重启宿主（R-12）。";
     }

@@ -1,5 +1,5 @@
 // fixture 矩阵：命中/不命中全表。纯函数级，不碰真实路径（R-01）
-import { apply } from "../index.js";
+import { apply, setSessionUserText } from "../index.js";
 
 let guard = null;
 const fakeCtx = {
@@ -8,6 +8,9 @@ const fakeCtx = {
   logger: { info: () => {} },
 };
 apply(fakeCtx, { logFile: "/tmp/dsh-guard-test/guard.log", hostServices: ["app.service"], requireSnapshot: false });
+
+// 2026-10-22：重启类命令现在要求本轮授权；矩阵里的「合法重启」用例先给授权上下文
+setSessionUserText("重启宿主并停服务");
 
 const DENY = [
   ["pkill -f main.py", "R-07 pkill -f"],
