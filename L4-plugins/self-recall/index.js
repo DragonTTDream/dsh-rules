@@ -381,10 +381,36 @@ export function ownerOf({ pid, pgid, cmd = "" }, { selfPids = new Set(), jobs = 
   return "foreign";
 }
 
+
+/**
+ * 预热的单一所有者判定（纯函数，可单测）。
+ * 病根（2026-10-22 实测）：脚本 EXIT trap 里 `( … ) &` 后台预热，工具侧看到 marker 时
+ * 那行 self-recall-warm= 还没写出来 ⇒ 工具又发一个预热请求 ⇒ 两个请求抢同一个装载，
+ * 第二个被 provider 拒 ⇒ warmOk:false / warmMs:0，但内存确实被第一个装回来了（53 GB）。
+ * 判据：有脚本结论就用它；已经装载就不要再打一次；都没有才自己发。
+ */
+export function decideWarm({ scriptWarmCode = "", alreadyLoaded = false } = {}) {
+  if (scriptWarmCode === "200") return { by: "script", ok: true };
+  if (alreadyLoaded) return { by: "already-loaded", ok: true };
+  return { by: "self", ok: false };
+}
+
 export function markerIn(file) {
   try { const hit = readFileSync(file, "utf8").match(/marker=(\S+)/); return hit ? hit[1] : ""; }
   catch { return ""; }
 }
+
+/** 等脚本 EXIT trap 写出 self-recall-warm=<code>（后台 subshell，可能晚于 marker 几十秒）。 */
+async function waitScriptWarm(file, maxSec = 120) {
+  const t0 = Date.now();
+  while ((Date.now() - t0) / 1000 < maxSec) {
+    const code = selfWarmCode(file);
+    if (code) return code;
+    await sleep(2000);
+  }
+  return "";
+}
+
 export function selfWarmCode(file) {
   try { const hit = readFileSync(file, "utf8").match(/self-recall-warm=(\d+)/); return hit ? hit[1] : ""; }
   catch { return ""; }
@@ -854,6 +880,7 @@ export function apply(ctx, config = {}) {
           workdir: { type: "string", required: true },
           warmMs: { type: "number", required: true, description: "自动回归+预热耗时（秒）；未做为 0。" },
           warmOk: { type: "boolean", required: true, description: "预热请求是否成功（模型已装载并热身）；未做为 false。" },
+          warmBy: { type: "string", required: true, description: "script=脚本EXIT trap / already-loaded=已装载 / self=工具自己发 / skipped" },
         },
       },
       render: renderJson,
@@ -971,13 +998,21 @@ export function apply(ctx, config = {}) {
         if (cfg.warmOnlyLocalSession && !routeIsLocal(cfg)) {
           await clearPending();
           log?.warn?.(`self-recall: 跳过回归预热(${why}) — 调用方会话路由 "${lastRoute?.model ?? "?"}" 不在本地模型表 [${localModels(cfg).join(", ")}]`);
-          return { skipped: true, ms: 0, ok: false };
+          // 主动跳过 ≠ 失败：报 ok:true + by 说明，避免用户在返回体里看到 warmOk:false 误判「没预热」
+          return { skipped: true, ms: 0, ok: true, by: "skipped-route" };
         }
-        // 任务脚本自己已经回归（R5 的 EXIT trap 发过 1 token）⇒ 不重复装载，只清 pending
-        if (selfWarmCode(out) === "200") {
+        // 单一所有者：先等脚本 EXIT trap 的结论（它是后台 subshell，可能晚于 marker）
+        const scriptCode = cfg.warmSelfScript && doWarmFlag ? await waitScriptWarm(out, Math.min(120, cap)) : "";
+        let loaded = false;
+        if (scriptCode !== "200") {
+          const st = String(await modelStatus({ ...cfg, model: target }) ?? "");
+          loaded = /ready|loaded|running/i.test(st);
+        }
+        const plan = decideWarm({ scriptWarmCode: scriptCode, alreadyLoaded: loaded });
+        if (plan.by === "script" || plan.by === "already-loaded") {
           await clearPending();
-          log?.warn?.("self-recall: 任务脚本已自行回归（self-recall-warm=200）⇒ 跳过重复装载");
-          return { skipped: true, ms: 0, ok: true };
+          log?.warn?.(`self-recall: 预热已由 ${plan.by} 完成（script=${scriptCode || "-"}, loaded=${loaded}）⇒ 不重复发请求`);
+          return { skipped: true, ms: 0, ok: true, by: plan.by };
         }
         for (const m of cfg.auxModels) {
           const u = await unloadModel({ ...cfg, model: m });
@@ -985,7 +1020,7 @@ export function apply(ctx, config = {}) {
         }
         const tw = Date.now();
         const w = await warmModel({ ...cfg, model: target });
-        const r = { skipped: false, ms: Math.round((Date.now() - tw) / 1000), ok: w.ok === true };
+        const r = { skipped: false, ms: Math.round((Date.now() - tw) / 1000), ok: w.ok === true, by: "self" };
         if (w.ok === true) await clearPending();
         else log?.warn?.(`self-recall: warm failed(${why}): ${w.error ?? "unknown"}（请求驱动的召回链照旧保底，pending 保留）`);
         return r;
@@ -1031,6 +1066,7 @@ export function apply(ctx, config = {}) {
         workdir: dir,
         warmMs: wr.ms,
         warmOk: wr.ok,
+        warmBy: String(wr.by || (wr.skipped ? "skipped" : "")),
       };
     },
   })));
