@@ -14,6 +14,7 @@
 | `profile/dependencies.md` | 装了哪些插件/bundle | 人维护 |
 | `plugins/wiring.md` | 3 个自制插件的本机参数与理由 | 人维护 |
 | `tools/snap.sh`、`restore.sh` | 单槽快照工具 | `bin/dsh-sync.sh` |
+| `tools/compaction-stats.sh` | 折叠统计（prune/折叠次数/失败/耗时），改压缩配置前后各跑一次 | 人维护 |
 
 ## 两条规矩
 
