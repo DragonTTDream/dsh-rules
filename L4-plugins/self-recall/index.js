@@ -184,6 +184,24 @@ export function jobAlive(dir) {
   try { return spawnSync("pgrep", ["-f", String(dir)], { encoding: "utf8", timeout: 5000 }).status === 0; }
   catch { return false; }
 }
+
+/**
+ * 轮询判定（纯函数，无 IO —— 所以能单测，不用等真实时间）。
+ * 输入是一次采样 + 三个阈值，输出「继续等 / 停，reason 是什么」。
+ *
+ * 优先级（越靠前越可信）：marker > 进程已死 > 到 cap > 日志静默。
+ * 依据（2026-10-22）：旧实现只认 marker ⇒ 脚本早失败或压根没起来都要干等到 cap。
+ */
+export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 0, elapsed = 0, failFast = 8, stallMin = 10, cap = 900 } = {}) {
+  if (marker) return { done: true, reason: "marker" };
+  const ff = Math.max(Number(failFast) || 0, 3);
+  if (!alive && elapsed >= ff) return { done: true, reason: size <= 0 ? "no-start" : "script-died" };
+  if (elapsed >= cap) return { done: true, reason: "timeout" };
+  const sm = Number(stallMin) || 0;
+  if (sm > 0 && quietSec >= sm * 60) return { done: true, reason: "stall" };
+  return { done: false, reason: "" };
+}
+
 export function markerIn(file) {
   try { const hit = readFileSync(file, "utf8").match(/marker=(\S+)/); return hit ? hit[1] : ""; }
   catch { return ""; }
@@ -543,16 +561,20 @@ export function apply(ctx, config = {}) {
         try { size = statSync(out).size; } catch { size = -1; }
         if (size !== lastSize) { lastSize = size; lastChangeAt = Date.now(); }
         quietSec = Math.round((Date.now() - lastChangeAt) / 1000);
-        const elapsed = (Date.now() - t0) / 1000;
-        // ① 早退：进程已退出且没写 marker（脚本语法错 / 路径错 / 自己 return）⇒ 立刻失败
-        if (!jobAlive(dir) && elapsed >= failFast) {
-          const late = markerIn(out);
-          if (late !== "") { marker = late; reason = "marker-late"; }
-          else reason = size <= 0 ? "no-start" : "script-died";
+        const d = pollDecision({
+          marker, alive: jobAlive(dir), size, quietSec,
+          elapsed: (Date.now() - t0) / 1000, failFast, stallMin, cap,
+        });
+        if (d.done) {
+          if (d.reason === "marker") { reason = "marker"; break; }
+          // 迟到的 marker 比"进程死了"更准确
+          if (d.reason === "script-died" || d.reason === "no-start") {
+            const late = markerIn(out);
+            if (late !== "") { marker = late; reason = "marker-late"; break; }
+          }
+          reason = d.reason;
           break;
         }
-        // ② 空转：进程活着，但日志 N 分钟没有新增一个字节
-        if (stallMin > 0 && quietSec >= stallMin * 60) { reason = "stall"; break; }
       }
       if (reason === "") reason = "timeout";
       // ── 自动回归 + 预热 ─────────────────────────────────────────────
