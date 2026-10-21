@@ -1,0 +1,23 @@
+# 技能 × 模式 绑定的单一事实源。
+# 由 dsh-rules/bin/skills-apply.sh 物化成 ~/.dsh/skillsets/<mode>/；不要手改 skillsets 目录。
+#
+# expose: auto    —— 模型可自选调用（物化成软链）
+# expose: command —— 只允许 /名字 调用（物化成副本 + disable-model-invocation: true）
+# auto_in: [...]  —— 这些模式里改用 auto（用于"自己的模式里自动、其它模式里只允许命令调用"）
+#
+# 为什么需要副本：skill-filesystem 的 customSkillDirs 只认目录、不能按名字过滤，
+# 所以"同一技能在不同模式可见性不同"只能靠两份文件表达。
+modes: [general, chef, stock-analysis-report, video-transcribe-pipeline, comfyui-workflow-safety]
+
+skills:
+  workspace-hygiene:         { modes: [all], expose: auto }
+  process-shell-safety:      { modes: [all], expose: auto }
+  debug-discipline:          { modes: [general, stock-analysis-report, video-transcribe-pipeline, comfyui-workflow-safety], expose: auto }
+  code-edit-lane:            { modes: [general], expose: auto }   # ← 现状如此；是否也该进其它模式见 PRESET-SKILLS.md §2.3
+  github-axi:                { modes: [general], expose: auto }   # ← 同上
+  skill-authoring:           { modes: [general], expose: auto }   # ← 同上
+
+  chef:                      { modes: [chef, general],                      expose: command, auto_in: [chef] }
+  stock-analysis-report:     { modes: [stock-analysis-report, general],     expose: command, auto_in: [stock-analysis-report] }
+  video-transcribe-pipeline: { modes: [video-transcribe-pipeline, general], expose: command, auto_in: [video-transcribe-pipeline] }
+  comfyui-workflow-safety:   { modes: [comfyui-workflow-safety, general],   expose: command, auto_in: [comfyui-workflow-safety] }

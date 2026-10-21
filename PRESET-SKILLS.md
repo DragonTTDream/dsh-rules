@@ -69,6 +69,28 @@ skills:
 2. **在 `cordis.patch.yml` 的 preset 注释里写明**：`includeDefaultRoots: false` ⇒ 新技能必须改 `skillsets/`，改仓库无效。
 3. **把 `regenerate.sh` 的 `FLAGGED` 数组加一行注释**：它是 manifest 的临时替身，不是设计。
 
+## 五点五、社区插件调研（2026-10-21，npm 实查）
+
+结论：**有三个相关插件，没有一个管"按预设绑定技能"**。
+
+| 插件 | 版本 | 它实际管什么 | 管 preset 的技能绑定？ |
+|---|---|---|---|
+| `@linxin666/dsh-client-ui-preset-center`（dsh-presets） | 0.4.8 | 从 dsh-market.com **下载/声明/停用/卸载社区预设**；装到惰性库 `$DSH_HOME/agent-presets/<id>/`；读 `preset.yml` + `agent.cordis.yml`，调 `register` 动态声明（无需重启）；有组合画像与 sha256 provenance | ❌ 它管"别人的预设怎么装进来"，不是"我自己的预设看哪些技能" |
+| `@michengai/dsh-skills-manager` | 1.2.10 | 统一管理本机/项目技能：按来源分组、搜索、启停、GitHub 安装、差异预览、备份回退 | ❌ 维度是"全局 vs 项目"，不是 agent preset |
+| `@linxin666/dsh-client-ui-skill-explorer` | 0.4.8 | 按来源分层浏览、**改写 SKILL.md 的 disable-model-invocation**（热刷新）、编辑/删除/回收站 | ❌ 同上 |
+
+**已装的 `@weibaohui/skills-management` 0.9.1** 已经覆盖了其中大部分（`modelInvocable` 图形化、
+注入开销 ≈token 统计、6600 技能市场、每日同步），**所以不必再装**上面两个技能类插件。
+
+它明确不能进 preset —— 其 patch 注释原文：插件是 HOST-PLANE，"must land in the host composition
+(this insert), **never inside an agent preset**"。所以"按模式差异"这件事天生不在它们的职责里。
+
+**为什么仍然需要本仓的 manifest**：`dsh-skill-filesystem` 的 Config 只有
+`includeDefaultRoots` / `bundledSkillDir` / `customSkillDirs`，**不支持按名字或 glob 过滤**
+⇒ "同一技能在不同模式可见性不同"只能靠两份文件表达 ⇒ 必须有物化步骤。
+社区插件的 `disable-model-invocation` 是**就地改源文件**，那会让该技能在所有模式里统一降级，
+表达不了差异。
+
 ## 六、不做什么
 
 - 不动内置模式（`standard` / `ptc` / `minimal` / `cordis`）——它们的技能表来自 web-app bundle，改了会被下次更新冲掉。
