@@ -69,8 +69,11 @@
     - id: tool-result-pruner
       name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
       config:
+        # 2026-10-22 二批：只砍得更狠，不扩大打击面（threshold 保持 8192）
+        # 理由：8192 以下不动 ⇒ 我们的 read 工作流（<8K 的文件读）保持完整；
+        #       >8K 的大输出（日志/ps/grep）从 5K 缩到 ~3K，那是上下文增长的主犯。
         thresholdChars: 8192
-        headChars: 4096
+        headChars: 2048
         tailChars: 1024
 - id: delegation
   name: cordis:group

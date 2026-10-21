@@ -42,3 +42,31 @@
 
 **已知坑**：`--dump-config` **不会**渲染 include 进来的预设子条目 `config`（只显示 `name` + `disabled`），
 所以别拿它当这项的验收闸；`resolveConfig` 也没从插件里导出。
+
+### 两批实验（2026-10-22，本地模型会话实测后定的）
+
+| 批次 | 改动 | 状态 | 为什么这么保守 |
+|---|---|---|---|
+| A | `compaction-basic.headroomTokens: 49152` | 已上线 | 阈值 163,840 → 180,224，每轮间隔 +16K ⇒ 折叠次数约 −13% |
+| B | `tool-result-pruner.headChars: 4096 → 2048`（variant：`thresholdChars` 保持 **8192**、`tailChars` 保持 1024） | 本次 | **不扩大打击面**：8192 以下不截断 ⇒ `read` 工作流（<8K 文件读）保持完整；只把 >8K 大输出的中段从 5K 缩到 ~3K |
+
+**为什么不直接上原方案（threshold 4096 / head 2048 / tail 512）**：
+1. `thresholdChars: 4096` 会让 4–8K 的工具结果也被截断——包括我们自己的 `read` 结果，中段行会消失；
+2. `tailChars: 512` 会砍掉失败取证的尾巴（R-14 依赖 `job.log` 尾部与 marker）。
+
+### 本地会话基线（改动前，来自本机 transcript）
+
+| 指标 | 实测 |
+|---|---|
+| 成功折叠 | 17 次，单次 **97–142 s**（中位 ~110 s） |
+| 失败折叠 | 4 次，**0 秒**，`prompt` 271,508 / 322,038 / 355,947 token > 262,144 ⇒ `400 request exceeds the context window` |
+| 每会话折叠 | 5 次（两个 -256k 会话，全成功） |
+| prune 事件 | 3–9 次/会话，**0 成本**（不调模型） |
+
+> ⚠️ 判据提醒：`compaction/end` 带 `error` 的 0 秒折叠 **不是**“便宜的折叠”，是**压了等于没压**。
+> 验收必须同时看两项：`summary` 次数 **和** `compaction/end.error` 必须为 0。
+
+### 已知上游缺陷（可提 issue）
+
+`compaction-basic` 的摘要请求**不自带窗口余量**：262,144 的窗口在 prompt 已经 271K 时仍发出去，
+被 provider 400 拒绝后整个折叠静默作废。期望行为：先裁到窗口内再摘要，或降级成 prune-only。
