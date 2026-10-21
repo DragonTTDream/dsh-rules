@@ -62,5 +62,33 @@ n=$(grep -rIoE '([0-9]{1,3}\.){3}[0-9]{1,3}|/home/[a-z]+' L2-skills 2>/dev/null 
 hits=$(grep -rIln '^visibility: local' --include='*.md' . 2>/dev/null | grep -v '^./local/' || true)
 [ -z "$hits" ] || bad "visibility: local 的文件必须放在 local/:"$'\n'"$hits"
 
+# ── 7. L0 规则的元数据已经"能自动查"的部分（把纪律下沉成机制）─────────
+for f in L0-always-on/R-*.md; do
+  [ -f "$f" ] || continue
+  # 7a 每条规则必须能指到证据文件（防止悬空引用）
+  ev=$(awk -F': *' '/^evidence:/{print $2; exit}' "$f")
+  case "$ev" in
+    ""|*INBOX*) : ;;                      # 允许指向待补台账
+    *) [ -e "$ev" ] || bad "$f: evidence 指向不存在的文件: $ev" ;;
+  esac
+  # 7b judge 必须非空（判据写不出来 = 这条还是"模棱两可"）
+  jd=$(awk -F': *' '/^judge:/{print $2; exit}' "$f")
+  [ -n "$jd" ] || bad "$f: 缺 judge（这条还不可判定）"
+  # 7c kind 只能是 rule / preference
+  kd=$(awk -F': *' '/^kind:/{print $2; exit}' "$f")
+  case "$kd" in rule|preference) : ;; *) bad "$f: kind 必须是 rule 或 preference（当前: ${kd:-空}）" ;; esac
+  # 7d 上下文税闸门：单条 ≥30 行就该拆分或下沉
+  lines=$(wc -l < "$f")
+  [ "$lines" -le 30 ] || say "WARN" "$f: $lines 行，超过 30 行闸门（考虑拆分或下沉）"
+done
+
+# ── 8. 插件 README 四节齐全（把"文档该写什么"从口头纪律变成检查）──────
+for f in L4-plugins/*/README.md; do
+  [ -f "$f" ] || continue
+  for sec in 注入点 失效症状 配置 恢复配方 依赖; do
+    grep -q "## $sec" "$f" || bad "$f: 缺一节「$sec」（模板见 templates/_plugin-readme.md）"
+  done
+done
+
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi
 exit "$fail"

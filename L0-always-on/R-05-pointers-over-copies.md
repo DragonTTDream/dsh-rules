@@ -2,6 +2,7 @@
 id: R-05
 title: 跨范围只放指针
 layer: L0
+kind: rule
 visibility: public
 since: 2026-09-23
 why: 同一份内容被复制到多个地方，改一处另几处就静默过期

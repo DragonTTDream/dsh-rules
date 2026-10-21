@@ -64,3 +64,13 @@ export const inject = ["tools", "llm", "attachments", "sessionProjections"];
 
 - 它不改主模型的 `input` 声明（真主模型仍是纯文本）。改道靠的是孪生条目。
 - 一次一张，不批量刷。批量识图会把离线窗口开合几十次，装载成本比收益大。
+
+## 依赖
+
+| 依赖 | 形态 | 缺了会怎样 |
+|---|---|---|
+| `ctx.tools` | 注入点 | `vision` 工具不存在 |
+| `llm/stream` | 事件钩子 | 改道不发生：图直接进主模型 ⇒ 要么报错要么被忽略 |
+| `attachments` / `sessionProjections` | 投影钩子 | 识别不到消息里的图片块，插件等于没装 |
+| 孪生模型条目 | 必须在 llm provider 的模型表里存在且声明 `input: [text, image]` | 选中该条目必 502（它只是个不存在的 id） |
+| 本地端点 unload/status | HTTP | 离线窗口开不起来，装不回主模型（会话像卡死） |

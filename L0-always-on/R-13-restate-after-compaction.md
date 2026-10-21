@@ -2,6 +2,7 @@
 id: R-13
 title: 压缩后先复述
 layer: L0
+kind: rule
 visibility: public
 since: 2026-09-23
 why: 上下文被摘要替换后，模型拿摘要里的旧语气当成了新授权

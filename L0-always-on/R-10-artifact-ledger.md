@@ -2,6 +2,7 @@
 id: R-10
 title: 建移删留台账
 layer: L0
+kind: rule
 visibility: public
 since: 2026-09-23
 why: 收尾清理时凭记忆删，删到了不是自己产生的东西

@@ -58,3 +58,12 @@ cp self-recall/index.js ~/dsh-self-recall/index.js
 
 这是唯一一个会主动**卸载用户正在用的模型**的插件。改它的判据前先读一遍
 `localModels` 的判定顺序，否则会出现"会话被自己的插件拖死"的形态。
+
+## 依赖
+
+| 依赖 | 形态 | 缺了会怎样 |
+|---|---|---|
+| `ctx.tools` | 注入点 | 插件不加载，三个 `arbitrate_*` 工具都不存在 |
+| `ctx.effect` | 注册计时器与清理 | pending 标记没人扫，跑完不自动回归 |
+| 本地推理端点 | HTTP：`/v1/models` 查状态、`/api/models/unload` 卸载 | 保活与卸载全失效（装配错误时最常见） |
+| `setsid` + `bash` | 系统命令 | 任务脚本无法脱离会话进程树，会随调用被回收 |

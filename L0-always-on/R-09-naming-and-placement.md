@@ -2,6 +2,7 @@
 id: R-09
 title: 产物按领域归位
 layer: L0
+kind: preference
 visibility: public
 since: 2026-09-23
 why: 新产物被塞进"看起来顺路"的目录，三个月后没人找得到

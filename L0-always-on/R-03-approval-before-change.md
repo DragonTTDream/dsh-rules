@@ -2,6 +2,7 @@
 id: R-03
 title: 改动前拿授权
 layer: L0
+kind: rule
 visibility: public
 since: 2026-10-03
 why: 模型把"取消两个变体"理解成"把那套配置也一并撤下登记"，用户原话："我什么时候说撤下原版！"
