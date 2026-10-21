@@ -1,39 +1,47 @@
-// 提问闸：用户还在分析时，不许把方案收敛成选择题逼他拍板。
-// 实测反例（2026-10-22）：用户正在权衡三条路，模型直接问「折叠提速走哪条？」。
-import { apply, askGate } from "../index.js";
+// 提问闸（第二版）：判据是**可逆性 + 是否带默认值**，不是猜用户心情。
+// 社区依据：Bezos 单/双行道（可逆自己定，不可逆上报）+ 12-factor #7（求助是结构化工具调用）+ KnowNO（只在超阈值不确定时求助）。
+import { apply, askGate, noteUserText } from "../index.js";
 
 let fail = 0;
 const check = (c, m, e = "") => { if (c) console.log(`  ✓ ${m}`); else { fail += 1; console.log(`  ✗ ${m}${e ? "  " + e : ""}`); } };
 
-console.log("=== 用户明确在按住（HOLD）⇒ 拒 ===");
-for (const t of ["先别动，我在分析", "还没定稿，我看看", "我正在读这几份材料", "不急，想想再说", "等我说的"]) {
-  check(typeof askGate({ userText: t, question: "走哪条？" }) === "string", `「${t}」⇒ 拒提问`);
+console.log("=== 第一道：没标可逆性 ⇒ 拒，并给模板 ===");
+const noMark = askGate({ userText: "把这三条路写清楚", question: "走哪条？", options: "A 快 / B 稳" });
+check(typeof noMark === "string" && noMark.includes("[one-way]"), "拒绝理由里给出标注模板");
+check(noMark.includes("双行道") || noMark.includes("two-way"), "并说明可逆不该问");
+
+console.log("=== [two-way] 可逆 ⇒ 拒（自己定 + 说明） ===");
+const two = askGate({ userText: "改这个函数", question: "[two-way] 变量名用 a 还是 b？" });
+check(typeof two === "string" && two.includes("可逆"), "可逆提问被拒");
+check(two.includes("说明你选了哪条"), "并要求在回复里说明选择");
+
+console.log("=== [one-way] 不可逆：没默认值 ⇒ 拒 ===");
+const oneNoDefault = askGate({ userText: "跑一下", question: "[one-way] 可以直接重建索引吗？" });
+check(typeof oneNoDefault === "string" && oneNoDefault.includes("默认"), "不可逆缺默认值被拒");
+
+console.log("=== [one-way] + 默认值 ⇒ 放行 ===");
+const ok = askGate({ userText: "跑一下", question: "[one-way] 重建索引不可逆（约 40 分钟）。默认：先做只读校验，不动索引。回退：快照。" });
+check(ok === undefined, "不可逆 + 默认 + 回退 ⇒ 允许问");
+
+console.log("=== 第二道：用户在按住 ⇒ 连 one-way 也不问 ===");
+for (const t of ["先别动，我在分析", "还没定稿，我看看", "我正在读材料", "等我说的"]) {
+  check(typeof askGate({ userText: t, question: "[one-way] 默认：不做" }) === "string", `「${t}」⇒ 拒`);
 }
 
-console.log("=== 把决定权推回去（PUSHBACK）⇒ 拒 ===");
-check(typeof askGate({ userText: "把这几条路的取舍写清楚", question: "走哪条？" }) === "string", "问「走哪条」而用户没让你定 ⇒ 拒");
-check(typeof askGate({ userText: "改这个函数", question: "选哪个方案", options: "A 快 / B 稳" }) === "string", "问「选哪个方案」⇒ 拒");
-
-console.log("=== 用户让你定 / 真需要授权 ⇒ 放行 ===");
-check(askGate({ userText: "你定，选一个", question: "走哪条？" }) === undefined, "用户说「你定」⇒ 放行");
-check(askGate({ userText: "改这个函数", question: "这个接口要连哪个库才符合你们规范？" }) === undefined, "正常信息缺口 ⇒ 放行");
-check(askGate({ userText: "先别动，我在分析", question: "x", enabled: false }) === undefined, "开关关掉 ⇒ 不拦");
-
-console.log("=== 接入守卫：ask_user_question 被拦 ===");
+console.log("=== 接入守卫 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/ask-${process.pid}.log`, requireSnapshot: false, hostServices: [] },
+  { logFile: `/tmp/ask2-${process.pid}.log`, requireSnapshot: false, hostServices: [] },
 );
-const { noteUserText } = await import("../index.js");
-const A = { id: "session-A" };
-noteUserText(A, "先别动，我在分析这几条路");
-const r = guard({
-  name: "ask_user_question",
-  agent: A,
-  arguments: { questions: [{ id: "route", question: "折叠提速走哪条？", options: [{ label: "A 快" }, { label: "B 稳" }] }] },
-});
-check(typeof r === "string" && r.includes("还在分析"), "守卫拦下并说明「还在分析」");
+const A = { id: "s-A" };
+noteUserText(A, "把这三条路的取舍写清楚");
+const r = guard({ name: "ask_user_question", agent: A, arguments: { questions: [{ id: "r", header: "[two-way]", question: "走哪条？" }] } });
+check(typeof r === "string", "守卫拦下可逆提问");
+
+noteUserText(A, "跑一下");
+const r2 = guard({ name: "ask_user_question", agent: A, arguments: { questions: [{ id: "r", header: "[one-way]", question: "默认：先只读校验" }] } });
+check(r2 === undefined, "不可逆 + 默认 ⇒ 放行");
 
 console.log(`\n失败 ${fail}`);
 console.log(fail === 0 ? "ASK-GATE GREEN" : "ASK-GATE RED");
