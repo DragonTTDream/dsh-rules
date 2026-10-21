@@ -40,6 +40,8 @@ export const Config = z.object({
   warmSelfScript: z.boolean(),
   warmOnlyLocalSession: z.boolean(),
   pendingScanMs: z.number().min(5000).step(1000),
+  failFastSec: z.number().min(0).step(1),
+  stallMinutes: z.number().min(0).step(1),
   shipSkill: z.boolean(),
   auxModels: z.array(z.string()),
   localModels: z.array(z.string()),
@@ -51,7 +53,7 @@ const DEFAULTS = {
   jitterRatio: 0.2,
   maxAttempts: 0,
   resetAfterMs: 300000,
-  endpoint: "",   // 填你自己的本地推理端点，如 "http://127.0.0.1:8080"
+  endpoint: "http://127.0.0.1:1234",
   model: "",
   unloadPath: "/api/models/unload",
   statusPath: "/v1/models",
@@ -396,7 +398,7 @@ export function apply(ctx, config = {}) {
         "- 提交这类任务只用 `arbitrate_run`：卸载模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回，无需用户发起对话。**装卸对象 = 本会话当前用的那个本地模型**（按会话路由解析，`config.localModels` 内任一命中即用；跟随你会话里选的纯文本/弹性条目，不写死一条）。",
         "- `arbitrate_run` 在 marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型（返回 `warmMs`/`warmOk`），provider 装载的 30–45 秒吃在工具调用里，用户下一条消息直接命中热模型；连续跑重活时传 `warm:false` 省这段时间。",
         "- **待回归兜底（插件保证，不靠自觉，四层闭环）**：`arbitrate_run` 卸载成功即落盘 pending 标记。**① 任务脚本自带回归**（插件在脚本头部注入 EXIT trap：任务一退出就卸 auxModels 并发 1 token 装回主模型，与 harness 是否放弃这次调用无关）；**② 插件定时器**每 `pendingScanMs` 毫秒检查 pending，任务进程已退出就补 warm（会话空闲无请求也照跑）；**③ 回合开始前**（`agent/pre-step`）检查 pending 补 warm；**④ 超时分支**补判迟到 marker 与任务进程状态。**任务进程还在跑时四层全部绝不装回**（串行独占不破）。`arbitrate_warm` 成功也会清掉标记。",
-        "- 任务脚本必须写 marker（成功和失败都要写，格式 `marker=<值>`），否则调用方只能干等到超时。**脚本不要 `exec` 重定向自己的 stdout** —— 插件已把 stdout 接进 job.log，抢走 stdout 会让 marker 永远读不到（2026-10-14 实测踩过）。",
+        "- 任务脚本必须写 marker（成功和失败都要写，格式 `marker=<值>`）。**早退三态**：`script-died`（进程退了没写 marker）/ `no-start`（压根没起来）/ `stall`（活着但日志静默 `stallMinutes`）——都不再干等到超时；返回体的 `reason`/`died`/`stall`/`quietSec` 会告诉你是哪种。**脚本不要 `exec` 重定向自己的 stdout** —— 插件已把 stdout 接进 job.log，抢走 stdout 会让 marker 永远读不到（2026-10-14 实测踩过）。",
         `- 跑重活前后用 \`arbitrate_status\` 看红线：MemAvailable ≥${freeGB}GB 自由跑；≥${floorGB}GB 降级并不碰模型；低于它才卸载。始终为用户保留 ≥${floorGB}GB 轻量办公余量。`,
         "- 绝不杀 provider 的装载子进程/进程组，也不要杀宿主进程与用户浏览器——那会掐断召回链，会话将无法自动恢复。",
         `- 长时间离线由本插件保活：模型请求失败后按 ${Math.round(cfg.initialDelayMs / 1000)}→${Math.round(cfg.maxDelayMs / 1000)} 秒退避重试${cfg.maxAttempts > 0 ? `，上限 ${cfg.maxAttempts} 次` : "，无上限"}。`,
@@ -465,7 +467,7 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_run",
-    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。",
+    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。",
     parameters: {
       script: { type: "string", required: true, description: "要执行的 bash 脚本内容。约定：结束时 echo 'marker=<值>'。" },
       label: { type: "string", description: "短标签，用于命名工作目录（默认 job）。" },
@@ -519,17 +521,34 @@ export function apply(ctx, config = {}) {
       });
       runner.unref?.();
       const t0 = Date.now();
-      let marker = "", tail = "";
+      let marker = "", tail = "", reason = "", lastSize = -1, lastChangeAt = Date.now(), quietSec = 0;
+      const { statSync, readFileSync } = await import("node:fs");
+      const failFast = Math.max(Number(cfg.failFastSec) || 0, 3);
+      const stallMin = Number(cfg.stallMinutes) || 0;
       while (Date.now() - t0 < cap * 1000) {
-        await sleep(10000);
+        await sleep(3000);
         try {
-          const { readFileSync } = await import("node:fs");
           const text = readFileSync(out, "utf8");
           tail = text.split("\n").slice(-40).join("\n");
           const hit = text.match(/marker=(\S+)/);
-          if (hit) { marker = hit[1]; break; }
+          if (hit) { marker = hit[1]; reason = "marker"; break; }
         } catch { /* 日志还没生成 */ }
+        let size = -1;
+        try { size = statSync(out).size; } catch { size = -1; }
+        if (size !== lastSize) { lastSize = size; lastChangeAt = Date.now(); }
+        quietSec = Math.round((Date.now() - lastChangeAt) / 1000);
+        const elapsed = (Date.now() - t0) / 1000;
+        // ① 早退：进程已退出且没写 marker（脚本语法错 / 路径错 / 自己 return）⇒ 立刻失败
+        if (!jobAlive(dir) && elapsed >= failFast) {
+          const late = markerIn(out);
+          if (late !== "") { marker = late; reason = "marker-late"; }
+          else reason = size <= 0 ? "no-start" : "script-died";
+          break;
+        }
+        // ② 空转：进程活着，但日志 N 分钟没有新增一个字节
+        if (stallMin > 0 && quietSec >= stallMin * 60) { reason = "stall"; break; }
       }
+      if (reason === "") reason = "timeout";
       // ── 自动回归 + 预热 ─────────────────────────────────────────────
       // 只在 marker 到手后做：marker 没等到 ⇒ 任务可能还在后台跑，此时装回模型 = 违反串行独占。
       // 顺序硬要求：先按「谁卸谁」卸掉重活拉起的辅助模型，再 warm 主模型（辅助模型在场时装主模型会 OOM）。
@@ -560,6 +579,9 @@ export function apply(ctx, config = {}) {
       };
       if (doWarm && marker !== "") {
         wr = await warmNow("marker");
+      } else if (doWarm && reason === "stall") {
+        // 进程还在跑 ⇒ 绝不装回（串行独占）；pending 交给 agent/pre-step 兜底
+        log?.warn?.("self-recall: 判定空转（日志静止）但任务仍在跑 ⇒ 不装回，请查 job.log 或手动终止");
       } else if (doWarm && marker === "") {
         // R2：超时 ≠ 任务没完。marker 后到 或 任务进程已退出 ⇒ 当场补 warm，不留离线态；
         //      任务确实还在跑 ⇒ 绝不装回（串行独占），把回归交给 agent/pre-step 的 pending 兜底。
@@ -571,7 +593,11 @@ export function apply(ctx, config = {}) {
       const after = await memInfo();
       return {
         marker,
-        timedOut: marker === "",
+        reason,
+        died: reason === "script-died" || reason === "no-start",
+        stall: reason === "stall",
+        timedOut: reason === "timeout",
+        quietSec,
         elapsedSec: Math.round((Date.now() - t0) / 1000),
         unloadOk: un.ok === true,
         unloadBody: String(un.body ?? ""),

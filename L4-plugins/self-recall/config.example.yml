@@ -39,6 +39,10 @@
         # 本机纪律已内化进工具描述时不发技能
         shipSkill: false
 
+        # 早退（2026-10-22）：进程退出却没写 marker ⇒ 立即失败；活着但日志静默 N 分钟 ⇒ 判空转
+        failFastSec: 8        # 最早 3 秒；进程没了且无 marker 就返回 script-died / no-start
+        stallMinutes: 10      # 日志 N 分钟没新增一个字节 ⇒ marker=stall；0 = 关
+
         # 待回归兜底的轮询间隔
         pendingScanMs: 15000
         pendingWarm: true
