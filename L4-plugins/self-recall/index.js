@@ -47,6 +47,8 @@ export const Config = z.object({
   attemptBudget: z.number().min(0).step(1),
   circuitAfter: z.number().min(0).step(1),
   ledgerPath: z.string(),
+  singleWindow: z.boolean(),
+  lockPath: z.string(),
   shipSkill: z.boolean(),
   auxModels: z.array(z.string()),
   localModels: z.array(z.string()),
@@ -77,7 +79,11 @@ const DEFAULTS = {
   // + Google SRE 的尝试预算 + Reflexion 的"重试要带自我批判"。
   attemptBudget: 2,      // 同一脚本（intermittent 类）最多尝试次数，0 = 不限
   circuitAfter: 3,       // 连续 N 次同因失败 ⇒ 熔断，要求换方法
-  ledgerPath: "~/.dsh/arbitrate/attempts.jsonl",   // 日志静默 N 分钟判空转（0 = 关）
+  ledgerPath: "~/.dsh/arbitrate/attempts.jsonl",
+  // 单窗口锁（2026-10-22 用户令）：本机只有一条推理序列，并行第二个重活窗口只会互相抢资源。
+  // 锁由任务脚本自己写（pid = $$），进程死了即视为陈旧，不靠 trap 清理（脚本可能自带 trap）。
+  singleWindow: true,
+  lockPath: "~/.dsh/arbitrate/window.lock",   // 日志静默 N 分钟判空转（0 = 关）
   auxModels: [],
   localModels: [],
 };
@@ -239,6 +245,22 @@ export function decideRerun({ prev = null, change = "", attemptBudget = 2, circu
   return { action: "allow", why: "intermittent+change", cls };
 }
 
+
+/** 从 agent/pre-step 载荷取本轮用户消息（逐字）。返回 null = 本轮没有新用户消息。 */
+export function sessionFactFrom(messages, at = Date.now(), turn = 0) {
+  if (!Array.isArray(messages)) return null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if ((m && m.role) !== "user") continue;
+    const c = m.content;
+    const text = typeof c === "string" ? c
+      : Array.isArray(c) ? c.map((x) => (typeof x === "string" ? x : (x && x.text) || "")).join(" ") : "";
+    if (!String(text).trim()) continue;
+    return { text: String(text).slice(0, 2000), at, turn, seq: m.id || m.seq || 0 };
+  }
+  return null;
+}
+
 export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 0, elapsed = 0, failFast = 8, stallMin = 10, cap = 900 } = {}) {
   if (marker) return { done: true, reason: "marker" };
   const ff = Math.max(Number(failFast) || 0, 3);
@@ -265,6 +287,36 @@ async function readLedger(file) {
 async function appendLedger(file, entry) {
   try { await mkdir(dirname(file), { recursive: true }); await appendFile(file, JSON.stringify(entry) + "\n", "utf8"); }
   catch { /* 台账失败不影响主流程 */ }
+}
+
+
+function lockFileOf(cfg) {
+  const p = String(cfg.lockPath || "~/.dsh/arbitrate/window.lock");
+  return p.startsWith("~") ? join(homedir(), p.slice(1).replace(/^\//, "")) : p;
+}
+
+/** 窗口锁：pid 还活着才算「有窗口在跑」。进程已死 ⇒ 陈旧，可被覆盖。 */
+export function liveWindowLock(cfg) {
+  try {
+    const j = JSON.parse(readFileSync(lockFileOf(cfg), "utf8"));
+    const pid = Number(j && j.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    try { process.kill(pid, 0); } catch { return null; }
+    return { pid, label: String((j && j.label) || ""), at: Number((j && j.at) || 0) };
+  } catch { return null; }
+}
+
+/** 写进任务脚本头部的单窗口锁（pid = 脚本自己的 $$）。 */
+export function windowLockSnippet(cfg, label) {
+  const lf = lockFileOf(cfg);
+  const safe = String(label || "").replace(/["\\]/g, "");
+  return [
+    "# self-recall: 单窗口锁（本机单序列，并行第二个窗口只抢资源，不加速）",
+    `SR_LOCK=${JSON.stringify(lf)}`,
+    'mkdir -p "$(dirname "$SR_LOCK")" 2>/dev/null',
+    `printf '{"pid":%s,"label":"${safe}","at":%s000}\\n' "$$" "$(date +%s)" > "$SR_LOCK" 2>/dev/null`,
+    "",
+  ].join("\n");
 }
 
 export function markerIn(file) {
@@ -395,6 +447,18 @@ export function apply(ctx, config = {}) {
   // 覆盖「工具调用被中断/放弃 ⇒ 挂在调用尾部的 warm 一起被弃」这条实测路径；跨宿主重启同样成立。
   // 硬约束：任务还在跑 ⇒ 绝不装回（串行独占不破）。
   let lastPendingWarm = 0;
+  // 会话事实（harness 侧真值）：给模型一个「读」的入口，而不是让它凭记忆写逐字原文。
+  // 依据 CaMeL（控制流/数据流分离）：授权与复述都不能来自模型自己写的字。
+  let lastFact = null;
+  let lastTurn = 0;
+  try {
+    ctx.on("agent/pre-step", async (payload, next) => {
+      const f = sessionFactFrom(payload?.messages, Date.now(), Number(payload?.turn) || 0);
+      if (f) { lastFact = f; lastTurn = f.turn; }
+      return next();
+    });
+  } catch { /* 取不到事件就退化成 null，工具会如实说"未知" */ }
+
   const disposePending = ctx.on("agent/pre-step", async (payload, next) => {
     const res = await next();
     try {
@@ -515,6 +579,39 @@ export function apply(ctx, config = {}) {
   const renderJson = (_a, v) => [{ type: "text", text: JSON.stringify(v) }];
 
   disposers.push(ctx.tools.register(defineTool({
+    name: "session_facts",
+    description: "读本会话的权威事实（由 harness 记录，经得起引用）：最近一条用户消息的逐字原文、时间、回合号。**需要引用用户原话时调它，不要凭上下文回忆写**——回忆写出来的逐字引语是幻觉高发区（实测被编成过「继续」）。",
+    parameters: {},
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          known: { type: "boolean", required: true },
+          text: { type: "string", required: true },
+          atIso: { type: "string", required: true },
+          turn: { type: "number", required: true },
+          note: { type: "string", required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute() {
+      if (!lastFact) {
+        return { known: false, text: "", atIso: "", turn: 0, note: "harness 尚未捕获到用户消息（本会话无记录或插件刚重启）" };
+      }
+      const isNow = lastFact.turn === lastTurn;
+      return {
+        known: true,
+        text: lastFact.text,
+        atIso: new Date(lastFact.at).toISOString(),
+        turn: lastFact.turn,
+        note: isNow ? "本轮用户消息（逐字，harness 记录）" : "上一条用户消息（可能不是本轮）",
+      };
+    },
+  })));
+
+  disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_status",
     description: "查看串行仲裁的决策依据：本地模型装载状态、MemAvailable、SwapFree，以及内存红线判定（green/yellow/red）。跑重活前后都该调一次。",
     parameters: {},
@@ -600,6 +697,20 @@ export function apply(ctx, config = {}) {
       const dir = join(tmpdir(), `arbitrate-${tag}-${Date.now()}`);
       await mkdir(dir, { recursive: true });
       const before = await memInfo();
+      // ── 单窗口：已有重活窗口在跑 ⇒ 拒（并行在本机无收益，只会互相抢显存/内存）──
+      if (cfg.singleWindow !== false) {
+        const busy = liveWindowLock(cfg);
+        if (busy) {
+          return {
+            marker: "", reason: "window-busy", capSec: cap, died: false, stall: false, timedOut: false,
+            quietSec: 0, previous: "", attempt: 1, rerunDenied: true, rerunWhy: "window-busy",
+            elapsedSec: 0, unloadOk: true, unloadBody: "skipped(已有窗口在跑，未卸载模型)",
+            memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
+            logTail: `已有重活窗口在跑：${busy.label || "未标注"} pid=${busy.pid}，起于 ${new Date(busy.at).toISOString()}`,
+            workdir: "", warmMs: 0, warmOk: false,
+          };
+        }
+      }
       // ── 重跑治理：同脚本的历史尝试（台账）→ 按失败类型决定 ──────────────
       const scriptBody = typeof script === "string" ? script : "";
       const scriptHash = createHash("sha256").update(scriptBody).digest("hex").slice(0, 16);
@@ -638,7 +749,7 @@ export function apply(ctx, config = {}) {
       // R5：把回归写进任务脚本本身（EXIT trap），任务进程脱离会话 ⇒ 与 harness 是否放弃调用无关
       const doWarmFlag = warm === false ? false : (warm === true ? true : cfg.warmAfterRun);
       const body = typeof script === "string" ? script : "";
-      await writeFile(sh, cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) + body : body, "utf8");
+      await writeFile(sh, (cfg.singleWindow === false ? "" : windowLockSnippet(cfg, tag)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
       // 单一启动路径：setsid 脱离会话 + 重定向，detached 后 unref，绝不随会话退出
       const runner = spawn("bash", ["-c", `setsid bash ${JSON.stringify(sh)} </dev/null > ${JSON.stringify(out)} 2>&1 &`], {
         cwd: dir,
