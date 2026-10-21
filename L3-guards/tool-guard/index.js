@@ -29,6 +29,7 @@ export const Config = z.object({
   enabled: z.boolean(),
   logFile: z.string(),
   allowPatterns: z.array(z.string()),
+  disposeAllow: z.array(z.string()),
   hostServices: z.array(z.string()),
   denyDestructive: z.boolean(),
   denyBypass: z.boolean(),
@@ -45,6 +46,10 @@ const DEFAULTS = {
   enabled: true,
   logFile: "~/.dsh/tool-guard.log",
   allowPatterns: [],
+  // 可抛弃区：这些根下面的具名子项允许直接递归强删，不问。
+  // 只打算删"自己刚建的临时目录"的人不该被拦（实测 190 次拒绝里 46 次是这类）。
+  // 根本身（/tmp、/var/tmp）不在此列：整根强删仍然拒。
+  disposeAllow: [],
   hostServices: [],   // 填你自己宿主服务的名字，如 ["app.service"]
   denyDestructive: true,
   denyBypass: true,
@@ -110,8 +115,45 @@ function flagsOf(seg) {
   return tokens(seg).filter((t) => t.startsWith("-"));
 }
 
+
+/** 系统目录：整根递归强删一律拒（不是"逐命令批准"，是没有商量的余地） */
+const TIER0_ROOTS = new Set([
+  "/", "/home", "/usr", "/etc", "/var", "/boot", "/opt", "/srv", "/root",
+  "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run",
+]);
+
+/**
+ * 递归强删的单个目标判据。返回拒绝理由，或 undefined 表示放行。
+ * 分三档：根部/变量/通配 ⇒ 拒；可抛弃区内的具名子项 ⇒ 放；其余 ⇒ 拒并给隔离区路标。
+ */
+function rmTargetVerdict(target, disposeAllow) {
+  const raw = String(target).replace(/^['"]|['"]$/g, "");
+  if (!raw) return "`rm -rf` 目标为空，拒绝。";
+  if (/[$`]/.test(raw)) {
+    return "Never 级：`rm -rf $VAR` 变量未校验即禁。先 `echo \"$VAR\"` 核对展开后的绝对路径，确认是本次产生的路径，再逐个点名删除（R-03 / R-12）。";
+  }
+  if (["/", "/*", ".", "..", "./*", "*", "~", "~/"].includes(raw)) {
+    return "Never 级：对根目录 / 当前目录 / 通配符 / 家目录无界递归强删即禁。改成只删本次产生的具名路径（R-03）。";
+  }
+  const abs = raw.startsWith("~") ? expand(raw) : raw;
+  if (abs.startsWith("/")) {
+    if (TIER0_ROOTS.has(abs) || /^\/home\/[^/]+$/.test(abs)) {
+      return "Never 级：对系统目录或整个家目录做递归强删即禁（R-03）。";
+    }
+    const inDispose = disposeAllow.some((r) => abs !== r && under(abs, [r]));
+    if (inDispose) return undefined;
+    const zones = disposeAllow.length ? disposeAllow.join(" ") : "（未配置 disposeAllow）";
+    return `破坏性动词需逐命令批准：\`rm -rf\` 打在 \`${raw}\` 上。免批区（可抛弃区）：${zones}。两个合规走法：① 移到隔离区（\`mv\` 到带时间戳的 trash 目录，可恢复优先于消失）；② 先报出确切路径与影响面，得到点头再跑（R-03 / R-12）。`;
+  }
+  // 相对路径：以 .. 开头或含通配 ⇒ 可能逃出当前目录，拒；否则视作当前目录下的具名项
+  if (raw.startsWith("..") || raw.includes("*")) {
+    return `相对路径 \`${raw}\` 可能逃出当前目录，拒绝。改成明确路径，或移进隔离区（R-03）。`;
+  }
+  return undefined;
+}
+
 /** R-03：破坏性动词。返回路标理由，或 undefined */
-function destructive(seg) {
+function destructive(seg, disposeAllow = []) {
   const exe = argv0(seg);
   const tk = tokens(seg);
   const fl = flagsOf(seg);
@@ -121,19 +163,21 @@ function destructive(seg) {
     const recursive = fl.some((f) => /^--recursive$/.test(f) || (/^-[^-]/.test(f) && f.includes("r")));
     const force = fl.some((f) => /^--force$/.test(f) || (/^-[^-]/.test(f) && f.includes("f")));
     if (recursive && force) {
-      const target = tk[tk.length - 1] || "";
-      if (/^\$\{?\w/.test(target)) {
-        return "Never 级：`rm -rf $VAR` 变量未校验即禁。先 `echo \"$VAR\"` 核对展开后的绝对路径，确认是本次产生的路径，再逐个点名删除（R-03 / R-12）。";
+      const targets = parseArgv(seg).rest.filter((t) => !t.startsWith("-"));
+      if (!targets.length) return "`rm -rf` 未给目标：拒绝（R-03）。";
+      for (const target of targets) {
+        const verdict = rmTargetVerdict(target, disposeAllow);
+        if (verdict) return verdict;
       }
-      if (/^(~|\/home\/[^/]+$|\/$|\$HOME)/.test(target)) {
-        return "Never 级：对 home / 根目录无界递归强删即禁。改成只删本次产生的具体路径（R-03）。";
-      }
-      return "破坏性动词需逐命令批准：`rm -rf` 属递归强删。改成把目标移动进隔离区（可恢复优先于消失，R-12），或先向用户报出确切路径与影响面、得到点头再跑（R-03）。";
+      return undefined; // 全部落在可抛弃区 / 当前目录具名项 ⇒ 放行
     }
   }
 
   if (exe === "find" && (tk.includes("-delete") || (tk.includes("-exec") && tk.some((t) => /^(rm|unlink)$/.test(t))))) {
-    return "破坏性动词需逐命令批准：`find … -delete` / `-exec rm` 等同递归强删。先列出将被删的文件清单交用户核对（R-03 / R-12）。";
+    const root = parseArgv(seg).rest.find((t) => !t.startsWith("-")) || "";
+    const absRoot = root.startsWith("~") ? expand(root) : root;
+    if (absRoot.startsWith("/") && disposeAllow.some((r) => absRoot !== r && under(absRoot, [r]))) return undefined;
+    return "破坏性动词需逐命令批准：`find … -delete` / `-exec rm` 等同递归强删。把搜索根限定在可抛弃区可直接放行；否则先列出将被删的清单交用户核对（R-03 / R-12）。";
   }
 
   if (exe === "git") {
@@ -314,6 +358,7 @@ export function apply(ctx, config = {}) {
   const logFile = expand(cfg.logFile);
   const services = cfg.hostServices.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
   const allow = cfg.allowPatterns.map((p) => new RegExp(p));
+  const disposeAllow = (cfg.disposeAllow || []).map(expand);
   const enabled = cfg.enabled !== false;
   const slot = expand(cfg.snapshotSlot);
   const targets_prefix = cfg.snapshotTargets.map(expand);
@@ -372,7 +417,7 @@ export function apply(ctx, config = {}) {
       for (const s of segs) { const r = bypass(s); if (r) return r; }
     }
     if (cfg.denyDestructive !== false) {
-      for (const s of segs) { const r = destructive(s); if (r) return r; }
+      for (const s of segs) { const r = destructive(s, disposeAllow); if (r) return r; }
     }
     return undefined;
   };
