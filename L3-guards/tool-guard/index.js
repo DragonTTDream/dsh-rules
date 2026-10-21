@@ -41,6 +41,8 @@ export const Config = z.object({
   maxAutoSnapshotBytes: z.number(),
   nudgeDelegationAfter: z.number(),
   nudgeTodoAfterBash: z.number(),
+  nudgeDelegationAfterReads: z.number(),
+  nudgeTodoAfterMinutes: z.number(),
   denyBackgroundSubagent: z.boolean(),
   snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
@@ -86,6 +88,11 @@ const DEFAULTS = {
   //   subagent 调用 0 次、todo_write 只 1 次 —— 提示层判据在长任务里不生效。
   nudgeDelegationAfter: 0,
   nudgeTodoAfterBash: 0,
+  // 2026-10-21 修正：按"调用次数"计会误伤正常实现流（实测两次命中都是编辑/跑脚本，
+  //   模型为了消提示而硬派子代理 = 指标驱动）。改成只数**读类命令**。
+  nudgeDelegationAfterReads: 0,
+  // 卡片提示改时间驱动：距上次 todo_write 超过 N 分钟才提示
+  nudgeTodoAfterMinutes: 0,
   // 单序列引擎上，后台子代理会与主对话抢同一条推理序列。
   // 实测（2026-10-21）：子代理 21:14:52–21:18:52 在跑，父会话同时又发了 3 步。
   denyBackgroundSubagent: true,
@@ -499,7 +506,13 @@ export function apply(ctx, config = {}) {
   const nudgeDeleg = Number(cfg.nudgeDelegationAfter) || 0;
   const nudgeTodo = Number(cfg.nudgeTodoAfterBash) || 0;
   let sinceDelegate = 0;
+  let readSinceDelegate = 0;
   let bashSinceTodo = 0;
+  let lastTodoAt = Date.now();
+  const READS = Number(cfg.nudgeDelegationAfterReads) || 0;
+  const TODO_MIN = Number(cfg.nudgeTodoAfterMinutes) || 0;
+  // 只认"读放大"型命令：它们才真的会往上下文灌体积
+  const READ_CMD = /(^|[\s;&|(])(cat|head|tail|less|more|grep|rg|find|journalctl|dmesg|curl|wget|sshpass|scp|ssh|openfiles|systemctl\s+(status|show)|ps|ls\s+-[a-zA-Z]*R|tree)\b/;
   const DELEGATE_HINT =
     "连续 %N% 次工具调用没有派过子代理。R-15 的判据是「会往主上下文灌进多少」：" +
     "工具结果 >200 KB / 单次 bash 输出 >5 万字节 / 同一目标 ≥3 条互不依赖的探针 ⇒ 必须派。" +
@@ -523,13 +536,24 @@ export function apply(ctx, config = {}) {
   };
 
   // 软提示：计数器维护 + 命中阈值时返回提示语（deny-once-then-reset）
-  const bump = (toolName) => {
+  const bump = (toolName, cmdText = "") => {
     if (nudgeDeleg > 0) {
       if (toolName === "subagent" || toolName === "subagent_fork") sinceDelegate = 0;
       else {
         sinceDelegate += 1;
         if (sinceDelegate >= nudgeDeleg) { sinceDelegate = 0; return DELEGATE_HINT.replace("%N%", nudgeDeleg); }
       }
+    }
+    if (READS > 0) {
+      if (toolName === "subagent" || toolName === "subagent_fork") readSinceDelegate = 0;
+      else if (READ_CMD.test(String(cmdText))) {
+        readSinceDelegate += 1;
+        if (readSinceDelegate >= READS) { readSinceDelegate = 0; return DELEGATE_HINT.replace("%N%", READS); }
+      }
+    }
+    if (TODO_MIN > 0) {
+      if (toolName === "todo_write") lastTodoAt = Date.now();
+      else if (Date.now() - lastTodoAt >= TODO_MIN * 60000) { lastTodoAt = Date.now(); return TODO_HINT.replace("%N%", TODO_MIN); }
     }
     if (nudgeTodo > 0) {
       if (toolName === "todo_write") bashSinceTodo = 0;
@@ -578,7 +602,7 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    if (!isShell && !isArb) { bump(name); return undefined; } // 窄面（判据 2）：非 shell 只维护计数
+    if (!isShell && !isArb) { bump(name, ""); return undefined; } // 窄面（判据 2）：非 shell 只维护计数
 
     const cmd = isShell ? exec?.arguments?.command : exec?.arguments?.script;
     if (typeof cmd !== "string" || !cmd) return undefined;
@@ -607,7 +631,7 @@ export function apply(ctx, config = {}) {
       const vars = collectVars(cmd);
     for (const s of segs) { const r = destructive(s, disposeAllow, vars); if (r) return r; }
     }
-    return bump(name);
+    return bump(name, cmd);
   };
 
   // guard 必须同步；自身出错一律 fail-open，绝不因防线故障锁死生产

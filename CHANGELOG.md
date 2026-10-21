@@ -2,6 +2,16 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号按"规则集语义"走。
 
+## [v0.6] — 2026-10-21
+
+### 修复
+- **软提示按"调用次数"计 = 误伤**。实测 6 分钟内两次委派提示命中的都是
+  `sed -i` 与"跑脚本"（不是侦察），模型为了消提示而硬派子代理 = 指标驱动。
+  - 委派提示改为只数**读类命令**（cat/tail/grep/find/curl/ssh/openfiles…），
+    键 `nudgeDelegationAfterReads`；旧的按次数版默认关。
+  - 卡片提示改为**时间驱动**（距上次 `todo_write` 的分钟数），键 `nudgeTodoAfterMinutes`。
+- 运维事实：`tool=subagent` 的拒绝始终是 0 条 —— 守卫从未挡过子代理本身，挡的是 bash。
+
 ## [v0.5] — 2026-10-21
 
 ### 变更
