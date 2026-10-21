@@ -77,7 +77,8 @@ L0-always-on/     常驻规则，一条一个文件；assemble.sh 拼成单一 A
 L1-scoped/        场景规则模板与示例（含"顶层用指针挂工作区纪律"的写法）
 L1.5-local/       个人覆盖层模板（去标识化后公开，供借鉴）
 L2-skills/        9 个技能原文（含 references/），直接可装
-L3-guards/        守卫：该拦什么（deny-list）+ 判别器实现 + 117 项陷阱用例
+L3-guards/        守卫：该拦什么（deny-list）+ 判别器实现 + 陷阱用例
+L4-plugins/       自制的「能力型」插件：self-recall（保活/资源仲裁）、vision-forward（视觉带外转发）
 incidents/        事故台账 —— 整个仓库的燃料
 research/         带来源的调研
 bin/lint.sh       分层校验 + 去标识化黑名单，CI 可直接跑
@@ -118,4 +119,5 @@ bin/lint.sh
 - [x] L0 常驻规则 15 条 + 元数据
 - [x] 事故台账（10 篇案例）
 - [x] L2 技能 9 个全量收录
-- [x] L3 守卫判别器开源（deny-list + 判别器 + 117 项陷阱用例，矩阵全绿）
+- [x] L3 守卫判别器开源（deny-list + 判别器 + 陷阱用例，全绿）
+- [x] L4 自制能力型插件 2 个（self-recall / vision-forward）

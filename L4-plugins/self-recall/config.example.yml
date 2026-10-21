@@ -1,0 +1,46 @@
+# self-recall 配置示例（贴进 profile 的 cordis.patch.yml 的 insert 段）
+# 新增条目必须走 insert：`- id:` 只用于覆盖 bundle 里已存在的条目。
+- insert:
+    - id: self-recall
+      name: dsh-self-recall
+      config:
+        # 本地推理端点与要保活的会话模型
+        endpoint: http://127.0.0.1:8080
+        model: your-local-model-id
+
+        # 保活：请求失败后指数退避重试，无上限（0 = 不设上限）
+        initialDelayMs: 5000
+        maxDelayMs: 30000
+        jitterRatio: 0.2
+        maxAttempts: 0
+        resetAfterMs: 300000
+
+        # 卸载/预热端点
+        statusPath: /v1/models
+        unloadPath: /api/models/unload
+
+        # 资源红线（MB）。低于 memFloorMB 才算紧；高于 freeRunMB 可以自由跑
+        memFloorMB: 4096
+        freeRunMB: 8192
+        modelGB: 16
+
+        # 跑完自动回归并预热
+        warmAfterRun: true
+
+        # 辅助模型：重活前先卸掉它们（谁卸谁），再装主模型，否则会 OOM
+        auxModels: []
+        #  - your-vision-model
+        #  - your-ocr-model
+
+        # 跟随会话当前模型：命中任一即用它；都不命中（会话在云端模型上）⇒ 跳过预热
+        localModels:
+          - your-local-model-id
+
+        # 本机纪律已内化进工具描述时不发技能
+        shipSkill: false
+
+        # 待回归兜底的轮询间隔
+        pendingScanMs: 15000
+        pendingWarm: true
+        warmSelfScript: true
+        warmOnlyLocalSession: true
