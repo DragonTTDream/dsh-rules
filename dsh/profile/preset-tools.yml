@@ -1,0 +1,155 @@
+# 预设共享工具清单 —— 5 个 agent preset 通过 cordis:include 共用本文件。
+# 内容 = 官方 standard preset 的 plugins 清单，去掉 skill-filesystem / tool-skill 两行
+# （技能行由各 preset 自己声明，才能按模式给不同技能根）。
+# 源：dsh-web-app/presets/standard.patch.yml:11-146，整体缩进 -10。
+# 改这个文件 = 5 个模式同时改；技能根不在这里，在各 preset 行里。
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    suffix: Your working directory is {{cwd}}.
+    prefix: You are a coding agent powered by the {{model}} model.
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+- id: command-goal
+  name: '@deepseek-ai/dsh-command-goal'
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+- id: planning
+  name: cordis:group
+  group: true
+  isolate:
+    planMode: true
+  config:
+    - id: plan-mode
+      name: '@deepseek-ai/dsh-plan-mode'
+      config:
+        section: |
+          You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+          Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+          The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+          Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+          Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+          When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+    # 2026-10-18 子代理收口（判据见 文档/llamacpp/strata-engine/02 §60）；2026-10-19 半回退：
+    #   本机引擎一次只跑一条序列（serve/server.py:7，在役命令行无 --batch）⇒ 子代理无算力并行，
+    #   唯一收益 = 上下文隔离 + 结构化收口；并发/后台子会互逐前缀与停放缓存（实测 29 s/轮 vs 0.6 s/轮）。
+    #   并发由插件侧 maxActiveSubagents:1 硬闸承担（cordis.patch.yml:435-439）。
+    #   run_in_background / backgroundMode: continuable 恢复：用户 2026-10-19 判定「平时不用，禁它零收益」，
+    #   且引擎将来支持并发时不必再改回来。保留的是子侧 deny（子调 arbitrate_run 会卸掉父会话在用的模型）。
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        # 本机 provider 只有 llm 一条（cordis.patch.yml:16-21）⇒ 选到不存在的模型 id 必 502，关掉
+        modelSelectionSettings: false
+        backgroundMode: continuable
+        maxDepth: 1
+        # 子禁止：扇出（subagent/subagent_fork/workflow）、宿主操作（vision/arbitrate_run/arbitrate_warm/job_kill）、present
+        # arbitrate_run 在子里会卸掉父会话正在用的模型 ⇒ 必禁
+        toolFilter:
+          deny: [subagent, subagent_fork, workflow, vision, arbitrate_run, arbitrate_warm, job_kill, present]
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        # fork 刻意不选模型：base 注释「inherited history remains eligible for KV Cache reuse」
+        # 实测播种 reused 95711 / 重读 43-47 / 0.5-0.6 s（02 §58.6）⇒ 消掉最贵的探索开销
+        modelSelectionSettings: false
+        backgroundMode: continuable
+        maxDepth: 1
+        toolFilter:
+          deny: [subagent, subagent_fork, workflow, vision, arbitrate_run, arbitrate_warm, job_kill, present]
+    - id: tool-subagent-codex
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: codex
+        toolName: subagent_codex
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+    - id: tool-subagent-claude-code
+      name: '@deepseek-ai/dsh-tool-subagent'
+      disabled: true
+      config:
+        provider: claude-code
+        toolName: subagent_claude_code
+        backgroundMode: one-shot
+        maxDepth: provider-managed
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
+      config:
+        provider: spawn
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+    - id: tool-ralph
+      name: '@deepseek-ai/dsh-tool-ralph'
+      disabled: true
+      config:
+        subagentProvider: spawn
+        maxRounds: 64
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: true
+    searchTimeoutMs: 60000
+- id: present
+  name: '@deepseek-ai/dsh-tool-present'
+- id: tool-plugin-manager
+  name: '@deepseek-ai/dsh-plugin-manager/tools'
+  disabled: true

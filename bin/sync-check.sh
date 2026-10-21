@@ -26,5 +26,10 @@ for p in self-recall vision-forward; do
   diff -q <(norm "$a") <(norm "$b") >/dev/null || { echo "DRIFT    插件内容不一致: $p"; fail=1; }
 done
 
+# dsh/ 镜像（单向：本机 → 仓）
+if [ -x "$ROOT/bin/dsh-sync.sh" ]; then
+  "$ROOT/bin/dsh-sync.sh" --check || fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "OK 仓库与本机真源一致（技能逐字一致；插件仅允许 endpoint 脱敏差异）"
 exit "$fail"

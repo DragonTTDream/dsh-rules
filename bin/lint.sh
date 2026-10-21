@@ -49,7 +49,7 @@ BLACKLIST=(
 ALLOW='example\.com|localhost|127\.0\.0\.1:port'
 for pat in "${BLACKLIST[@]}"; do
   hits=$(grep -rInE -- "$pat" --include='*.md' --include='*.sh' \
-         L0-always-on L1-scoped L1.5-local research incidents 2>/dev/null \
+         L0-always-on L1-scoped L1.5-local research incidents dsh 2>/dev/null \
          | grep -vE "$ALLOW" | grep -v "lint:allow" || true)  # 行内豁免：讲规则本身而非泄漏
   [ -z "$hits" ] || bad "黑名单命中 [$pat]:"$'\n'"$hits"
 done
