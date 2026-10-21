@@ -10,7 +10,7 @@
 
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
-import { mkdir, writeFile, access, unlink, readFile, appendFile } from "node:fs/promises";
+import { mkdir, writeFile, access, unlink, readFile, appendFile, readdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -49,6 +49,7 @@ export const Config = z.object({
   ledgerPath: z.string(),
   singleWindow: z.boolean(),
   lockPath: z.string(),
+  jobDir: z.string(),
   shipSkill: z.boolean(),
   auxModels: z.array(z.string()),
   localModels: z.array(z.string()),
@@ -83,7 +84,9 @@ const DEFAULTS = {
   // 单窗口锁（2026-10-22 用户令）：本机只有一条推理序列，并行第二个重活窗口只会互相抢资源。
   // 锁由任务脚本自己写（pid = $$），进程死了即视为陈旧，不靠 trap 清理（脚本可能自带 trap）。
   singleWindow: true,
-  lockPath: "~/.dsh/arbitrate/window.lock",   // 日志静默 N 分钟判空转（0 = 关）
+  lockPath: "~/.dsh/arbitrate/window.lock",
+  // 作业身份（capability）：任务脚本自己写 pid/pgid，之后按「组」终止，不按模式搜索。
+  jobDir: "~/.dsh/arbitrate/jobs",   // 日志静默 N 分钟判空转（0 = 关）
   auxModels: [],
   localModels: [],
 };
@@ -307,16 +310,75 @@ export function liveWindowLock(cfg) {
 }
 
 /** 写进任务脚本头部的单窗口锁（pid = 脚本自己的 $$）。 */
-export function windowLockSnippet(cfg, label) {
+export function windowLockSnippet(cfg, label, jobId = "") {
   const lf = lockFileOf(cfg);
+  const jd = jobDirOf(cfg);
   const safe = String(label || "").replace(/["\\]/g, "");
+  const jid = String(jobId || label || "job").replace(/["\\]/g, "");
   return [
-    "# self-recall: 单窗口锁（本机单序列，并行第二个窗口只抢资源，不加速）",
+    "# self-recall: 单窗口锁 + 作业身份（pid/pgid 由脚本自己写，之后按组终止）",
     `SR_LOCK=${JSON.stringify(lf)}`,
-    'mkdir -p "$(dirname "$SR_LOCK")" 2>/dev/null',
+    `SR_JOBDIR=${JSON.stringify(jd)}`,
+    'SR_PGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " ")',
+    'mkdir -p "$(dirname "$SR_LOCK")" "$SR_JOBDIR" 2>/dev/null',
     `printf '{"pid":%s,"label":"${safe}","at":%s000}\\n' "$$" "$(date +%s)" > "$SR_LOCK" 2>/dev/null`,
+    `printf '{"jobId":"${jid}","pid":%s,"pgid":%s,"label":"${safe}","at":%s000}\\n' "$$" "\${SR_PGID:-$$}" "$(date +%s)" > "$SR_JOBDIR/${jid}.json" 2>/dev/null`,
     "",
   ].join("\n");
+}
+
+/** 读作业记录（capability 清单）。 */
+export async function readJobs(cfg) {
+  const dir = jobDirOf(cfg);
+  let names = [];
+  try { names = await readdir(dir); } catch { return []; }
+  const out = [];
+  for (const f of names.filter((x) => x.endsWith(".json"))) {
+    try { out.push(JSON.parse(await readFile(join(dir, f), "utf8"))); } catch { /* 坏文件跳过 */ }
+  }
+  return out;
+}
+
+function jobDirOf(cfg) {
+  const p = String(cfg.jobDir || "~/.dsh/arbitrate/jobs");
+  return p.startsWith("~") ? join(homedir(), p.slice(1).replace(/^\//, "")) : p;
+}
+
+/** 进程存活 + 读它的 pgid（/proc/<pid>/stat 第 5 列）。 */
+export function procInfo(pid) {
+  try {
+    const st = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const rp = st.slice(st.lastIndexOf(")") + 2).split(" ");
+    return { alive: true, pgid: Number(rp[2]), comm: String(readFileSync(`/proc/${pid}/comm`, "utf8")).trim() };
+  } catch { return { alive: false, pgid: 0, comm: "" }; }
+}
+
+/** 本进程及其祖先链（永不可杀）。 */
+export function selfChain() {
+  const out = new Set();
+  let pid = process.pid;
+  for (let i = 0; i < 12 && pid > 1; i += 1) {
+    out.add(pid);
+    const info = procInfo(pid);
+    if (!info.alive) break;
+    try {
+      const st = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const rp = st.slice(st.lastIndexOf(")") + 2).split(" ");
+      pid = Number(rp[1]);
+    } catch { break; }
+  }
+  return out;
+}
+
+const PROTECTED = /dsh-web|llama-swap|llama\.cpp|serve\/server\.py|engine\/strata/;
+
+/** 给一个进程行打归属标签。纯函数，可单测。 */
+export function ownerOf({ pid, pgid, cmd = "" }, { selfPids = new Set(), jobs = [], protectedRe = PROTECTED } = {}) {
+  if (selfPids.has(pid)) return "self";
+  if (protectedRe.test(cmd)) return "protected";
+  const j = jobs.find((x) => Number(x.pgid) === Number(pgid));
+  if (j) return `mine:${j.jobId || j.label || "job"}`;
+  return "foreign";
 }
 
 export function markerIn(file) {
@@ -414,6 +476,7 @@ export function apply(ctx, config = {}) {
     ledgerPath: str(config.ledgerPath, DEFAULTS.ledgerPath),
     singleWindow: config.singleWindow !== false,
     lockPath: str(config.lockPath, DEFAULTS.lockPath),
+    jobDir: str(config.jobDir, DEFAULTS.jobDir),
   };
   const log = ctx.logger;
   let attempts = 0, lastFailure = 0;
@@ -558,6 +621,7 @@ export function apply(ctx, config = {}) {
         "- **重跑治理（插件侧，按失败类型判）**：首次直接跑；上次是 stall/timeout（intermittent）⇒ 必须填 change（一句「上次为什么失败 + 这次改了什么」），且在同脚本 attemptBudget 次预算内；上次 script-died/no-start 且日志里有 syntax error / No such file / permission denied（permanent）⇒ 拒绝重跑，返回体直接给出上次错误行；宿主重启或中断类（transient）⇒ 原样放行。返回体的 previous/attempt/rerunWhy 说明它为什么允许或拒绝。",
         "- 任务脚本必须写 marker（成功和失败都要写，格式 `marker=<值>`）。**早退三态**：`script-died`（进程退了没写 marker）/ `no-start`（压根没起来）/ `stall`（活着但日志静默 `stallMinutes`）——都不再干等到超时；返回体的 `reason`/`died`/`stall`/`quietSec` 会告诉你是哪种。**脚本不要 `exec` 重定向自己的 stdout** —— 插件已把 stdout 接进 job.log，抢走 stdout 会让 marker 永远读不到（2026-10-14 实测踩过）。",
         `- 跑重活前后用 \`arbitrate_status\` 看红线：MemAvailable ≥${freeGB}GB 自由跑；≥${floorGB}GB 降级并不碰模型；低于它才卸载。始终为用户保留 ≥${floorGB}GB 轻量办公余量。`,
+        "- **杀进程按身份，不按模式**：`arbitrate_run` 返回 `jobId`；要清掉窗口就 `proc_kill({jobId})`——它杀的是那个**进程组**，构造上不含你自己的调用链。不知道是谁就先 `proc_list`（带归属：self / protected / mine:<jobId> / foreign），再按 pid 精确杀。**禁止在 shell 里按命令行模式挑进程再杀**：命令自己的命令行含那个模式，必然把自己算进匹配集（2026-10-22 实测把本次调用链一起 SIGTERM）。",
         "- 绝不杀 provider 的装载子进程/进程组，也不要杀宿主进程与用户浏览器——那会掐断召回链，会话将无法自动恢复。",
         `- 长时间离线由本插件保活：模型请求失败后按 ${Math.round(cfg.initialDelayMs / 1000)}→${Math.round(cfg.maxDelayMs / 1000)} 秒退避重试${cfg.maxAttempts > 0 ? `，上限 ${cfg.maxAttempts} 次` : "，无上限"}。`,
       ].join("\n");
@@ -619,6 +683,103 @@ export function apply(ctx, config = {}) {
     },
   })));
 
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: "proc_list",
+    description: "看本机进程**是谁**：列出 pid/pgid/归属（self=我自己的调用链，protected=宿主/llama-swap/引擎，mine:<jobId>=本会话起的重活窗口，foreign=其它），默认已剔除自己与父链。要杀进程前先调它，按 pid 精确杀，不要用命令行模式搜索（那会把这条命令自己的 shell 也算进去）。",
+    parameters: {
+      match: { type: "string", description: "可选：只列命令行里含该子串的进程（过滤在工具内部做，避免你在 shell 里写模式）" },
+      limit: { type: "number", description: "最多返回几行，默认 40" },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          rows: { type: "array", required: true, items: { type: "string" } },
+          total: { type: "number", required: true },
+          hiddenSelf: { type: "number", required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute({ match, limit } = {}) {
+      const jobs = await readJobs(cfg);
+      const selfPids = selfChain();
+      const out = spawnSync("ps", ["-eo", "pid=,ppid=,pgid=,etimes=,args="], { encoding: "utf8", timeout: 8000 });
+      const rows = [];
+      let hiddenSelf = 0;
+      for (const line of String(out.stdout || "").split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        const m = t.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/);
+        if (!m) continue;
+        const pid = Number(m[1]), ppid = Number(m[2]), pgid = Number(m[3]), etimes = Number(m[4]);
+        const cmd = m[5].slice(0, 300);
+        if (selfPids.has(pid)) { hiddenSelf += 1; continue; }
+        if (match && !cmd.includes(String(match))) continue;
+        const owner = ownerOf({ pid, pgid, cmd }, { selfPids, jobs });
+        const who = `pid=${pid} ppid=${ppid} pgid=${pgid} 已运行=${etimes}s 归属=${owner} cmd=${cmd.slice(0, 140)}`;
+        rows.push(who);
+      }
+      const cap = Math.max(1, Math.min(Number(limit) || 40, 200));
+      return { rows: rows.slice(0, cap), total: rows.length, hiddenSelf };
+    },
+  })));
+
+  disposers.push(ctx.tools.register(defineTool({
+    name: "proc_kill",
+    description: "按**身份**终止进程：给 jobId ⇒ 杀该作业的整个进程组（构造上不含调用者）；给 pids ⇒ 逐个核对归属，self/protected 一律拒绝，foreign 必须带 confirm:true。不要再用命令行模式挑进程。",
+    parameters: {
+      jobId: { type: "string", description: "作业 id（arbitrate_run 返回的 jobId）" },
+      pids: { type: "array", items: { type: "number" }, description: "要杀的 pid 列表" },
+      confirm: { type: "boolean", description: "杀 foreign 进程时必须为 true" },
+      signal: { type: "string", description: "TERM（默认）或 KILL" },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean", required: true },
+          killed: { type: "array", required: true, items: { type: "number" } },
+          refused: { type: "array", required: true, items: { type: "string" } },
+          note: { type: "string", required: true },
+        },
+      },
+      render: renderJson,
+    },
+    async execute({ jobId, pids, confirm, signal } = {}) {
+      const sig = String(signal || "TERM").toUpperCase() === "KILL" ? "SIGKILL" : "SIGTERM";
+      const jobs = await readJobs(cfg);
+      const selfPids = selfChain();
+      const killed = [], refused = [], notes = [];
+      const job = jobId ? jobs.find((j) => j.jobId === jobId) : undefined;
+      if (jobId && !job) return { ok: false, killed, refused: [`未知 jobId: ${jobId}`], note: "用 proc_list 看有哪些作业" };
+      if (job) {
+        const info = procInfo(Number(job.pid));
+        if (selfPids.has(Number(job.pid))) refused.push(`jobId ${jobId} 的进程属于我自己的调用链，拒绝`);
+        else if (!info.alive) notes.push(`作业 ${jobId} 已退出（pid 不存在），无需终止`);
+        else {
+          try { process.kill(-Number(job.pgid), sig); killed.push(...[]); notes.push(`已向进程组 -${job.pgid} 发 ${sig}`); }
+          catch (e) { refused.push(`发信号失败: ${e && e.message}`); }
+        }
+      }
+      const list = Array.isArray(pids) ? pids.map(Number).filter((x) => Number.isInteger(x) && x > 0) : [];
+      for (const pid of list) {
+        if (selfPids.has(pid)) { refused.push(`pid ${pid} 在我自己的调用链里，拒绝`); continue; }
+        const info = procInfo(pid);
+        if (!info.alive) { refused.push(`pid ${pid} 不存在`); continue; }
+        const cmd = (() => { try { return readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ").trim(); } catch { return ""; } })();
+        const owner = ownerOf({ pid, pgid: info.pgid, cmd }, { selfPids, jobs });
+        if (owner === "protected") { refused.push(`pid ${pid} 是受保护进程（宿主/llama-swap/引擎），只能走用户授权`); continue; }
+        if (owner === "foreign" && confirm !== true) { refused.push(`pid ${pid} 是 foreign（${cmd.slice(0, 60)}），要杀请带 confirm:true 并说明理由`); continue; }
+        try { process.kill(pid, sig); killed.push(pid); } catch (e) { refused.push(`pid ${pid} 发信号失败: ${e && e.message}`); }
+      }
+      return { ok: Boolean(killed.length > 0 || (job && notes.length > 0)), killed, refused, note: notes.join("；") || (killed.length ? `已发 ${sig}` : "什么也没做") };
+    },
+  })));
+
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_status",
     description: "查看串行仲裁的决策依据：本地模型装载状态、MemAvailable、SwapFree，以及内存红线判定（green/yellow/red）。跑重活前后都该调一次。",
@@ -674,6 +835,7 @@ export function apply(ctx, config = {}) {
         properties: {
           marker: { type: "string", required: true, description: "脚本写出的 marker；空串表示没等到。" },
           reason: { type: "string", required: true, description: "marker | marker-late | script-died | no-start | stall | timeout" },
+          jobId: { type: "string", required: true, description: "本次作业身份（proc_kill 用它按组终止，不必搜索进程）" },
           capSec: { type: "number", required: true, description: "本次实际生效的等待上限（硬上限 900）" },
           previous: { type: "string", required: true, description: "同一脚本上一次尝试的 JSON（空串 = 首次）。含 reason/marker/workdir/logTail" },
           attempt: { type: "number", required: true, description: "同一脚本的第几次尝试" },
@@ -702,6 +864,7 @@ export function apply(ctx, config = {}) {
       const CAP_MAX_SEC = 900;
       const cap = Math.min(Math.max(Number(timeoutSec) || 900, 30), CAP_MAX_SEC);
       const tag = String(label || "job").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "job";
+      const jobId = `${tag}-${Date.now()}`;
       const dir = join(tmpdir(), `arbitrate-${tag}-${Date.now()}`);
       await mkdir(dir, { recursive: true });
       const before = await memInfo();
@@ -710,7 +873,7 @@ export function apply(ctx, config = {}) {
         const busy = liveWindowLock(cfg);
         if (busy) {
           return {
-            marker: "", reason: "window-busy", capSec: cap, died: false, stall: false, timedOut: false,
+            marker: "", reason: "window-busy", jobId, capSec: cap, died: false, stall: false, timedOut: false,
             quietSec: 0, previous: "", attempt: 1, rerunDenied: true, rerunWhy: "window-busy",
             elapsedSec: 0, unloadOk: true, unloadBody: "skipped(已有窗口在跑，未卸载模型)",
             memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
@@ -739,7 +902,7 @@ export function apply(ctx, config = {}) {
           logTail: String(prev.logTailTail || "").slice(-600),
         }) : "";
         return {
-          marker: "", reason: "rerun-denied", capSec: cap, died: false, stall: false, timedOut: false,
+          marker: "", reason: "rerun-denied", jobId, capSec: cap, died: false, stall: false, timedOut: false,
           quietSec: 0, previous: prevJson, attempt, rerunDenied: true, rerunWhy: decision.why,
           elapsedSec: 0, unloadOk: true, unloadBody: "skipped(重跑被拒，未卸载模型)",
           memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
@@ -757,7 +920,7 @@ export function apply(ctx, config = {}) {
       // R5：把回归写进任务脚本本身（EXIT trap），任务进程脱离会话 ⇒ 与 harness 是否放弃调用无关
       const doWarmFlag = warm === false ? false : (warm === true ? true : cfg.warmAfterRun);
       const body = typeof script === "string" ? script : "";
-      await writeFile(sh, (cfg.singleWindow === false ? "" : windowLockSnippet(cfg, tag)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
+      await writeFile(sh, (cfg.singleWindow === false ? "" : windowLockSnippet(cfg, tag, jobId)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
       // 单一启动路径：setsid 脱离会话 + 重定向，detached 后 unref，绝不随会话退出
       const runner = spawn("bash", ["-c", `setsid bash ${JSON.stringify(sh)} </dev/null > ${JSON.stringify(out)} 2>&1 &`], {
         cwd: dir,
@@ -849,6 +1012,7 @@ export function apply(ctx, config = {}) {
       return {
         marker,
         reason,
+        jobId,
         capSec: cap,
         previous: prev ? JSON.stringify({ at: new Date(prev.at || 0).toISOString(), reason: prev.reason, attempt: prev.attempt, workdir: prev.workdir, logTail: String(prev.logTailTail || "").slice(-600) }) : "",
         attempt,

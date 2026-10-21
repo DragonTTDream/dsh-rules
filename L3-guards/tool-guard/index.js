@@ -17,7 +17,8 @@
  *   7) 逃生口：enabled 开关 + allowPatterns 豁免正则。
  */
 
-import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, readFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFile, chmodSync, copyFileSync, existsSync, mkdir, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import z from "@deepseek-ai/schemastery";
@@ -333,7 +334,13 @@ function wholeCommand(cmd) {
   const kills = /\b(kill|killall)\b|\bxargs\b[^\n]*\bkill\b/;
   const whitelist = /comm=|\bpidof\b|--pid\b|\bppid\b/;
   if (patPick.test(cmd) && kills.test(cmd) && !whitelist.test(cmd)) {
-    return "用命令行模式挑进程直接杀，会把运行这条命令的 shell 自己算进匹配集（本次调用链一起死）。**拆成两条命令**：① `pgrep -f <模式>` 只看清单；② `ps -o pid,ppid,cmd -p <PID>` 核对到具体 PID 后 `kill <PID>`。确需批量过滤时必须带白名单：`pgrep -f … | while read p; do [ \"$(ps -o comm= -p $p)\" = <可执行名> ] && kill \"$p\"; done` 或 `pidof <可执行名>`（R-07 / L2 process-shell-safety）。";
+    const pat = patternOf(cmd);
+    const who = whoWouldDie(pat, { selfPids: selfPidSet(), jobPgids: jobPgidMap() });
+    const whoText = who.length
+      ? `\n这条命令会命中这些进程：\n  - ${who.join("\n  - ")}\n`
+      : "\n（当前没有进程的 cmdline 含该模式；但你自己的 shell 会在执行时因为命令行含它而被算进去）\n";
+    const base = whoText + "要清掉某个重活窗口请用 `proc_kill({jobId})`（按进程组，构造上杀不到调用者）；要看清全部进程调 `proc_list`。\n";
+    return base + "用命令行模式挑进程直接杀，会把运行这条命令的 shell 自己算进匹配集（本次调用链一起死）。**拆成两条命令**：① `pgrep -f <模式>` 只看清单；② `ps -o pid,ppid,cmd -p <PID>` 核对到具体 PID 后 `kill <PID>`。确需批量过滤时必须带白名单：`pgrep -f … | while read p; do [ \"$(ps -o comm= -p $p)\" = <可执行名> ] && kill \"$p\"; done` 或 `pidof <可执行名>`（R-07 / L2 process-shell-safety）。";
   }
   return undefined;
 }
@@ -484,6 +491,64 @@ export function shellWriteTargets(cmd) {
 
 
 // ── 本轮用户消息捕获（agent/pre-step 的载荷带 messages）──────────────────
+
+/** 从命令里取出 -f 后面那个模式（只用于向用户展示会命中谁）。 */
+export function patternOf(cmd) {
+  const m = String(cmd || "").match(/\b(?:p|pg)kill?\w*\b[^\n]*?\s-[a-zA-Z]*f\s+["']?([^"'\s|;)]+)/)
+    || String(cmd || "").match(/\bpgrep\b[^\n]*?\s-[a-zA-Z]*f\s+["']?([^"'\s|;)]+)/);
+  return m ? m[1] : "";
+}
+
+/** 列出「按这个模式会被杀掉」的进程，并标注归属：self=调用链 / protected=宿主与引擎 / job=重活窗口 / foreign。 */
+export function whoWouldDie(pattern, { selfPids = new Set(), jobPgids = new Map() } = {}) {
+  if (!pattern) return [];
+  const r = spawnSync("ps", ["-eo", "pid=,pgid=,args="], { encoding: "utf8", timeout: 5000 });
+  const rows = [];
+  for (const line of String((r && r.stdout) || "").split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = t.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]), pgid = Number(m[2]), cmdline = m[3];
+    if (!cmdline.includes(pattern)) continue;
+    let owner = "foreign";
+    if (selfPids.has(pid)) owner = "self(你自己的调用链)";
+    else if (/dsh-web|llama-swap|llama\.cpp|serve\/server\.py|engine\/strata/.test(cmdline)) owner = "protected(宿主/引擎)";
+    else if (jobPgids.has(pgid)) owner = `job:${jobPgids.get(pgid)}`;
+    rows.push(`${pid}(pgid ${pgid}) ${owner} ${cmdline.slice(0, 60)}`);
+    if (rows.length >= 8) break;
+  }
+  return rows;
+}
+
+function selfPidSet() {
+  const out = new Set();
+  let pid = process.pid;
+  for (let i = 0; i < 12 && pid > 1; i += 1) {
+    out.add(pid);
+    try {
+      const st = readFileSync(`/proc/${pid}/stat`, "utf8");
+      pid = Number(st.slice(st.lastIndexOf(")") + 2).split(" ")[1]);
+    } catch { break; }
+  }
+  return out;
+}
+
+function jobPgidMap() {
+  const map = new Map();
+  const dir = `${process.env.HOME || "/home/loong"}/.dsh/arbitrate/jobs`;
+  try {
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const j = JSON.parse(readFileSync(`${dir}/${f}`, "utf8"));
+        if (j && j.pgid) map.set(Number(j.pgid), String(j.jobId || j.label || f));
+      } catch { /* 跳过坏文件 */ }
+    }
+  } catch { /* 目录不存在 */ }
+  return map;
+}
+
 export function messageText(m) {
   if (!m) return "";
   const c = m.content;

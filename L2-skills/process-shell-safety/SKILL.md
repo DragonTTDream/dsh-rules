@@ -3,6 +3,13 @@ name: process-shell-safety
 description: 进程与 shell 操作的安全约束，覆盖 pkill/pgrep -f 自匹配、宽泛模式误杀无关进程、后台进程随会话退出、切断对话载体、宿主重启连带回收本次调用内的进程与 job、破坏性命令未批准即执行等常见失误。
 whenToUse: 执行 kill/pkill/pgrep/重启服务/后台拉起，或编写含进程操作的脚本时使用；命令无输出即结束、脚本自杀、服务重启后掉线时也用。**设计含「重启宿主/服务」的验证闸门、批量更新、带闸门的脚本方案时，动手前就用**——这类设计会切断会话载体。要跑删除/清理/迁移/覆盖写类命令（rm -rf、git reset/clean/stash、dnf remove、DROP/DELETE、格式化），或写这类脚本时，也用。
 ---
+## 按身份杀，不按模式搜
+
+- **能拿到身份就用身份**：`arbitrate_run` 返回 `jobId` ⇒ `proc_kill({jobId})` 杀整个进程组（`setsid` 保证组内只有它自己）。
+- **不认识就先看清**：`proc_list` 列出 pid/pgid/归属（self / protected / mine:<jobId> / foreign），已剔除自身调用链；再按 pid 精确 `proc_kill({pids:[...]})`。
+- **禁止**用命令行模式挑进程再杀（`pgrep`/`ps` 配 `grep` 再接杀手）：命令自己的命令行含那个模式，**必然**把自己算进匹配集。
+- 依据：capability 的身份由创建时发放，不在调用时搜索；systemd `KillMode=control-group` 同理「停组，不猜」。
+
 ## 用命令行模式挑进程直接杀（禁）
 
 **判据是动作，不是写法。** 同一条命令里同时出现「按模式挑进程」与「kill」⇒ 危险：
