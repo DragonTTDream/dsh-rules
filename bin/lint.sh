@@ -49,21 +49,18 @@ BLACKLIST=(
 ALLOW='example\.com|localhost|127\.0\.0\.1:port'
 for pat in "${BLACKLIST[@]}"; do
   hits=$(grep -rInE -- "$pat" --include='*.md' --include='*.sh' \
-         L0-always-on L1-scoped L1.5-local L2-skills L3-guards research incidents 2>/dev/null \
+         L0-always-on L1-scoped L1.5-local research incidents 2>/dev/null \
          | grep -vE "$ALLOW" || true)
   [ -z "$hits" ] || bad "黑名单命中 [$pat]:"$'\n'"$hits"
 done
 
+# ── 4b. L2 技能允许含本机事实，但要提示移植时需替换 ─────────────
+n=$(grep -rIoE '([0-9]{1,3}\.){3}[0-9]{1,3}|/home/[a-z]+' L2-skills 2>/dev/null | wc -l)
+[ "$n" -eq 0 ] || say "WARN" "L2-skills 含 $n 处本机事实（回环地址/本机路径），换机器使用需自行替换"
+
 # ── 5. local/ 之外不许出现 visibility: local ──────────────────────
 hits=$(grep -rIln '^visibility: local' --include='*.md' . 2>/dev/null | grep -v '^./local/' || true)
 [ -z "$hits" ] || bad "visibility: local 的文件必须放在 local/:"$'\n'"$hits"
-
-# ── 6. 技能正文不许重抄规则（引用式） ─────────────────────────────
-for f in L2-skills/*/SKILL.md; do
-  [ -f "$f" ] || continue
-  n=$(grep -cE '^\s*(R-[0-9]{2})|R-[0-9]{2}' "$f" || true)
-  [ "$n" -ge 1 ] || say "WARN" "$f: 未引用任何 R-id（技能应当在正文里指回规则）"
-done
 
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi
 exit "$fail"

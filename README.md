@@ -76,7 +76,7 @@ enforced_by: [prompt]     # prompt | skill | guard
 L0-always-on/     常驻规则，一条一个文件；assemble.sh 拼成单一 AGENTS.md
 L1-scoped/        场景规则模板与示例（含"顶层用指针挂工作区纪律"的写法）
 L1.5-local/       个人覆盖层模板（去标识化后公开，供借鉴）
-L2-skills/        技能：正文只引用 R-id，不重抄规则
+L2-skills/        9 个技能原文（含 references/），直接可装
 L3-guards/        守卫：该拦什么 + 参考实现
 incidents/        事故台账 —— 整个仓库的燃料
 research/         带来源的调研
@@ -115,8 +115,7 @@ bin/lint.sh
 
 ## 八、路线图
 
-- [x] L0 常驻规则拆分 + 元数据
-- [x] 事故台账开张
-- [ ] L2 技能改引用式，正文不再重抄规则
+- [x] L0 常驻规则 15 条 + 元数据
+- [x] 事故台账（10 篇案例）
+- [x] L2 技能 9 个全量收录
 - [ ] L3 守卫判别器开源（该拦什么 + 参考实现 + 陷阱用例矩阵）
-- [ ] `bin/install.sh` 一键装配
