@@ -3,6 +3,20 @@ name: process-shell-safety
 description: 进程与 shell 操作的安全约束，覆盖 pkill/pgrep -f 自匹配、宽泛模式误杀无关进程、后台进程随会话退出、切断对话载体、宿主重启连带回收本次调用内的进程与 job、破坏性命令未批准即执行等常见失误。
 whenToUse: 执行 kill/pkill/pgrep/重启服务/后台拉起，或编写含进程操作的脚本时使用；命令无输出即结束、脚本自杀、服务重启后掉线时也用。**设计含「重启宿主/服务」的验证闸门、批量更新、带闸门的脚本方案时，动手前就用**——这类设计会切断会话载体。要跑删除/清理/迁移/覆盖写类命令（rm -rf、git reset/clean/stash、dnf remove、DROP/DELETE、格式化），或写这类脚本时，也用。
 ---
+## 用命令行模式挑进程直接杀（禁）
+
+**判据是动作，不是写法。** 同一条命令里同时出现「按模式挑进程」与「kill」⇒ 危险：
+
+- 挑进程：`pgrep -f` / `pkill -f` / `ps … | grep`
+- 杀进程：`kill` / `killall` / `xargs kill`
+- 白名单豁免：`comm=` / `pidof` / `--pid` / `ppid`
+
+调用者的 shell 命令行里就含着那个模式，**一定会把自己算进匹配集**——写成管道、`$( )`、
+`while read` 循环都改变不了这一点（2026-10-22 实测：`kill $(pgrep -f "x.sh")` 把本次调用链一起杀了）。
+
+合法两条路：① 拆成两条命令（先 `pgrep -f` 看清单 → `ps -o pid,ppid,cmd -p <PID>` 核对 → `kill <PID>`）；
+② 必须批量时带白名单：`pgrep -f … | while read p; do [ "$(ps -o comm= -p $p)" = <名> ] && kill "$p"; done`。
+
 
 # 进程与 shell 安全
 

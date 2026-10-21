@@ -324,10 +324,16 @@ function wholeCommand(cmd) {
   // 把确认答案/密码喂进交互式提权提示（跨管道）
   const pipe = interactivePipe(cmd);
   if (pipe) return pipe;
-  // pgrep -f 直接管道给杀手，且无 comm 过滤（技能认可的唯一合法形态是带 comm 过滤）
-  if (/\bpgrep\s+-[a-z]*f\b/.test(cmd) && /\b(xargs[^\n]*\bkill\b|\|\s*kill\b|\|\s*pkill\b)/.test(cmd)
-      && !/ps\s+-o\s+comm/.test(cmd) && !/\bcomm=/.test(cmd)) {
-    return "`pgrep -f … | xargs kill` 会把匹配到的祖先进程（含你自己的 shell）一起杀掉。合法形态是带 comm 过滤：`pgrep -f … | while read p; do [ \"$(ps -o comm= -p $p)\" = python ] && kill \"$p\"; done`；先用 `ps -o pid,ppid,cmd -p <PID>` 核对（R-07）。";
+  // 用「命令行模式」挑进程直接杀：判据是那类动作，不是某个写法。
+  // 2026-10-22 实测：旧规则只挡 pkill -f、管道给 xargs kill、以及 until 循环三种写法，
+  // 而命令替换 kill $(pgrep -f …)、while read 循环、ps|grep|awk|xargs kill 全部放行
+  // ⇒ 用户执行带该模式的命令时，把本次调用链一起 SIGTERM 了。
+  // 危险与写法无关：管道、xargs、命令替换、while 循环都会把调用者的 shell 自己算进匹配集。
+  const patPick = /\bpgrep\s+(-[a-z]*f|--full)\b|\bpkill\s+(-[a-z]*f|--full)\b|\bps\b[^|\n]*\|\s*(?:grep|egrep)\b/;
+  const kills = /\b(kill|killall)\b|\bxargs\b[^\n]*\bkill\b/;
+  const whitelist = /comm=|\bpidof\b|--pid\b|\bppid\b/;
+  if (patPick.test(cmd) && kills.test(cmd) && !whitelist.test(cmd)) {
+    return "用命令行模式挑进程直接杀，会把运行这条命令的 shell 自己算进匹配集（本次调用链一起死）。**拆成两条命令**：① `pgrep -f <模式>` 只看清单；② `ps -o pid,ppid,cmd -p <PID>` 核对到具体 PID 后 `kill <PID>`。确需批量过滤时必须带白名单：`pgrep -f … | while read p; do [ \"$(ps -o comm= -p $p)\" = <可执行名> ] && kill \"$p\"; done` 或 `pidof <可执行名>`（R-07 / L2 process-shell-safety）。";
   }
   return undefined;
 }
