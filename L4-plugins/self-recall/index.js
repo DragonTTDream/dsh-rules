@@ -65,6 +65,8 @@ const DEFAULTS = {
   warmSelfScript: true,
   warmOnlyLocalSession: true,
   pendingScanMs: 20000,
+  failFastSec: 8,      // 进程没了且无 marker ⇒ 8 秒判失败（下限 3）
+  stallMinutes: 10,   // 日志静默 N 分钟判空转（0 = 关）
   auxModels: [],
   localModels: [],
 };
