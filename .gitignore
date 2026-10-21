@@ -1,0 +1,18 @@
+# 个人覆盖层与私自改写的规则，永不入公开仓
+local/
+*.local.md
+AGENTS.local.md
+!L1.5-local/AGENTS.local.template.md
+
+# 本机装配与密钥
+credentials*
+vault/
+*.key
+*.pem
+.env
+
+# 运行产物
+node_modules/
+*.log
+dist/
+.DS_Store

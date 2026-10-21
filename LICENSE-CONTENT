@@ -1,0 +1,9 @@
+规则文本、技能、提示词、事故案例与调研文档（即 rules/, skills/, prompts/,
+incidents/, research/ 下的内容）采用 CC BY 4.0 许可：
+
+  https://creativecommons.org/licenses/by/4.0/
+
+你可以自由复制、修改、分发、商用这些文本，条件是署名来源。上面链接的
+法律文本是唯一有效版本，本文件只是说明它的适用范围。
+
+代码（bin/ 与 L3-guards/ 下的可执行实现）采用 MIT，见 LICENSE。
