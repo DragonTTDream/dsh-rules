@@ -109,5 +109,21 @@ for f in L2-skills/*/SKILL.md; do
   done
 done
 
+# ── 11. 技能 frontmatter 必须是合法 YAML（否则加载器静默跳过，重启也不会出现）──
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  for f in L2-skills/*/SKILL.md; do
+    [ -f "$f" ] || continue
+    python3 - "$f" <<'PYEOF' || bad "$f: frontmatter 不是合法 YAML（加载器会静默跳过该技能）"
+import sys, yaml, pathlib
+s = pathlib.Path(sys.argv[1]).read_text()
+if not s.startswith("---"): sys.exit(1)
+end = s.find("\n---", 3)
+yaml.safe_load(s[3:end])
+PYEOF
+  done
+else
+  say "WARN" "无 python3+yaml，跳过 frontmatter 解析检查"
+fi
+
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi
 exit "$fail"

@@ -12,7 +12,7 @@ modes: [general, chef, stock-analysis-report, video-transcribe-pipeline, comfyui
 skills:
   workspace-hygiene:         { modes: [all], expose: auto }
   process-shell-safety:      { modes: [all], expose: auto }
-  debug-discipline:          { modes: [general, stock-analysis-report, video-transcribe-pipeline, comfyui-workflow-safety], expose: auto }
+  debug-discipline:          { modes: [general], expose: auto }   # 只服务通用模式；四个任务模式各有专属工作，不掺调试清单
   code-edit-lane:            { modes: [general], expose: auto }   # ← 现状如此；是否也该进其它模式见 PRESET-SKILLS.md §2.3
   github-axi:                { modes: [general], expose: auto }   # ← 同上
   skill-authoring:           { modes: [general], expose: auto }   # ← 同上
