@@ -48,7 +48,7 @@ console.log("=== 接入守卫：draft 期写盘被拦 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], planFile: draft },
+  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0, planFile: draft },
 );
 const g = guard({ name: "bash", arguments: { command: "rm -rf /tmp/x" } });
 check(typeof g === "string" && g.includes("方案还没定稿"), "守卫拦下 rm 并说明方案未定稿");

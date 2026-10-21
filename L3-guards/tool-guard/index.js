@@ -44,6 +44,8 @@ export const Config = z.object({
   nudgeTodoAfterBash: z.number(),
   nudgeDelegationAfterReads: z.number(),
   nudgeTodoAfterMinutes: z.number(),
+  requireTodoEveryMutations: z.number(),
+  requireTodoEveryMinutes: z.number(),
   denyBackgroundSubagent: z.boolean(),
   denyBackgroundSubagent: z.boolean(),
   requireUserAuthForRestart: z.boolean(),
@@ -86,6 +88,10 @@ const DEFAULTS = {
   nudgeTodoAfterBash: 0,
   nudgeDelegationAfterReads: 12,
   nudgeTodoAfterMinutes: 20,
+  // 2026-10-22 用户令：卡片不许"跑完再更新"。软提示无效（实测 50 次改盘只更新 1 次卡片、
+  // 第 1 次还在 5 次改盘之后）⇒ 改成硬门：改盘 N 次或 M 分钟没**有效**更新卡片，就拒下一次改盘。
+  requireTodoEveryMutations: 8,
+  requireTodoEveryMinutes: 10,
   denyBackgroundSubagent: true,
   // 2026-10-22 用户令：重启等会中断生产的动作，必须由**本轮用户消息**明确授权。
   // 起因：我把某轮一次的"改完直接重启"当成常驻授权，一晚重启宿主 7–8 次。
@@ -747,6 +753,8 @@ export function apply(ctx, config = {}) {
   let readSinceDelegate = 0;
   let bashSinceTodo = 0;
   let lastTodoAt = Date.now();
+  let todoFingerprint = "";
+  let mutSinceTodo = 0;
   try {
     ctx?.on?.("agent/pre-step", async (payload, next) => {
       const t = latestUserText(payload?.messages);
@@ -858,6 +866,34 @@ export function apply(ctx, config = {}) {
         plan: planState(abs),
       });
       if (gPlan) return gPlan;
+    }
+    // ── 卡片硬门：改盘 N 次 / M 分钟没有「有效」更新 ⇒ 拒下一次改盘 ──────────
+    {
+      const everyMut = Number(cfg.requireTodoEveryMutations) || 0;
+      const everyMin = Number(cfg.requireTodoEveryMinutes) || 0;
+      const isMut = name === "write" || name === "edit" || name === "arbitrate_run"
+        || (name === "bash" && STATE_CHANGING.test(String(exec?.arguments?.command ?? "")));
+      if (name === "todo_write") {
+        const items = exec?.arguments?.todos ?? exec?.arguments?.items ?? [];
+        const fp = JSON.stringify(items);
+        if (fp === todoFingerprint) {
+          return "这次 todo_write 的内容与上次**完全相同**，不算更新。卡片是进度快照，不是收尾报告："
+            + "把已完成的标 completed、把当前正在做的写清楚、补上下一条，再提交。";
+        }
+        todoFingerprint = fp;
+        mutSinceTodo = 0;
+        lastTodoAt = Date.now();
+      } else if (isMut) {
+        const mins = (Date.now() - lastTodoAt) / 60000;
+        const overMut = everyMut > 0 && mutSinceTodo >= everyMut;
+        const overMin = everyMin > 0 && mins >= everyMin && mutSinceTodo >= 2;
+        if (overMut || overMin) {
+          return `任务卡片过期（已连续 ${mutSinceTodo} 次改盘 / ${Math.round(mins)} 分钟没更新）⇒ 先 todo_write 再继续。`
+            + "要求：已完成项标 completed、当前进度与下一步写清楚（**同内容重写不算更新**）。"
+            + "判据来自实测：50 次改盘只更新过 1 次卡片，而且那次也是在 5 次改盘之后。";
+        }
+        mutSinceTodo += 1;
+      }
     }
     if (name === "ask_user_question" && cfg.denyAskWhileAnalyzing !== false) {
       const a = exec?.arguments && typeof exec.arguments === "object" ? exec.arguments : {};
