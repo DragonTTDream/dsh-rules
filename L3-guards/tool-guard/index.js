@@ -514,7 +514,7 @@ export function apply(ctx, config = {}) {
   // 只认"读放大"型命令：它们才真的会往上下文灌体积
   const READ_CMD = /(^|[\s;&|(])(cat|head|tail|less|more|grep|rg|find|journalctl|dmesg|curl|wget|sshpass|scp|ssh|openfiles|systemctl\s+(status|show)|ps|ls\s+-[a-zA-Z]*R|tree)\b/;
   const DELEGATE_HINT =
-    "连续 %N% 次工具调用没有派过子代理。R-15 的判据是「会往主上下文灌进多少」：" +
+    "连续 %N% 条读类命令没有派过子代理。R-15 的判据是「会往主上下文灌进多少」：" +
     "工具结果 >200 KB / 单次 bash 输出 >5 万字节 / 同一目标 ≥3 条互不依赖的探针 ⇒ 必须派。" +
     "派活照 templates/delegate.md 三段填（范围 / 判据 / 输出 schema）。" +
     "本条是软提示：计数已重置，下一次放行——但请先用 subagent 或 subagent_fork 把读入量挪出去。";
