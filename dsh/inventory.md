@@ -18,6 +18,15 @@
 | `~/.dsh/snapshots/{snap,restore}.sh` | 单槽快照工具 | **镜像** | `dsh/tools/` |
 | `~/dsh-{self-recall,vision-forward,tool-guard}/` | 3 个自制插件 | 镜像（脱敏） | `L3-guards/`、`L4-plugins/` |
 
+## 一点五、经常用但不在 `~/.dsh` 的 DSH 相关资产
+
+| 路径 | 是什么 | 仓内 |
+|---|---|---|
+| `文档/llamacpp/strata-engine/reverse-clone-bench/` | 代码编辑 lane 的工作台（自带 git） | 指针：技能 `code-edit-lane` |
+| 同上 `.opencode/agents/{clone-worker,clone-offline,clone-scout}.md` | 三个 worker 变体（接口宽窄不同） | 指针 + 技能里的选型表 |
+| 同上 `bin/{run-worker,check,lane-*,retry-spec,cost-log}.sh` | 提交 / 闸门 / 进度页 / 失败回灌 / 成本台账 | 指针 |
+| 同上 `out/cost.tsv` | 按批成本台账（input/output/cache_read/wall） | 中间物，不入仓 |
+
 ## 二、只写摘要、不进仓的（含本机事实）
 
 | 项 | 为什么不收 | 在哪能回忆起来 |

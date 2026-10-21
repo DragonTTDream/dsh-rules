@@ -2,6 +2,18 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号按"规则集语义"走。
 
+## [v0.5] — 2026-10-21
+
+### 变更
+- `code-edit-lane` 技能：新增「选哪个 worker」选型表（clone-worker / clone-offline / clone-scout）；
+  闸门红了改走 `bin/retry-spec.sh`（失败证据自动回灌，禁止"再试一次"）；
+  收尾记成本 `bin/cost-log.sh` → `out/cost.tsv`（含 cache_read 命中率）。
+- 新增实测结论：每批新建会话 ⇒ **前缀缓存不跨批**；单会话累计 input 2.0–2.4M token ⇒
+  「减少步数」比「复用前缀」更值钱。
+
+### 依据
+SWE-agent ACI（接口宽度决定表现）、Aider repo map（自动位置索引）、GitHub Spec Kit（证据先于实现）。
+
 ## [v0.4] — 2026-10-21
 
 ### 变更
