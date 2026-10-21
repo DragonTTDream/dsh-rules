@@ -1,0 +1,40 @@
+# tool-guard 配置示例（贴进你 profile 的 cordis.patch.yml）
+#
+# 逃生口：enabled: false = 只记日志不拒绝（新规则观察期）；allowPatterns = 豁免正则。
+- insert:
+    - id: tool-guard
+      name: dsh-tool-guard
+      config:
+        enabled: true
+        logFile: ~/.dsh/tool-guard.log
+        allowPatterns: []
+
+        # 你自己的宿主服务名。留空 = 跳过「重启 + 后台」与「脚本内重启」两项判定。
+        hostServices: []
+        #  - app.service
+
+        denyDestructive: true          # 递归强删 / 重置 / 卸载 / 格式化
+        denyBypass: true               # 绝对路径绕过、管道喂确认、设「关掉检查」的变量
+        denyPkillF: true               # 按完整命令行匹配的进程查询与杀灭（自匹配）
+        denyRestartWithBackground: true
+        denyRestartInScript: true
+
+        # ── 快照闸门（规则 R-12 的机制层兜底）──────────────────────────
+        # 语义：要写「被正在运行的东西消费的产物」⇒ 快照位里必须有该目标的快照，
+        #       没有就拒绝，并在理由里直接给出该跑的 snap 命令。
+        # 保证不了：快照新鲜度（闸门看不出快照是不是本次动手前做的）⇒ 靠规则。
+        requireSnapshot: true
+        snapshotSlot: ~/.dsh/snapshots/latest
+        snapshotTargets:
+          - ~/.dsh/profiles
+          - ~/.dsh/skills
+          - ~/.dsh/skillsets
+          - ~/.dsh/AGENTS.md
+          - ~/.config/systemd/user
+          # 自研插件代码目录也加进来（改它们等于改宿主行为）
+          # - ~/my-plugin
+        snapshotExempt:
+          - ~/.dsh/snapshots
+          - ~/.dsh/tool-guard.log
+          - /tmp
+          - ~/workspace

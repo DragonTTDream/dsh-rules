@@ -1,0 +1,33 @@
+{
+  "name": "dsh-tool-guard",
+  "version": "0.1.0",
+  "description": "Shell 纪律硬防线：用 harness 原生单调守卫（tools/pre-execute 机制层）把可静态判定的 shell 安全纪律变成硬拒绝 —— 递归强删、绕过 wrapper、pkill -f 自匹配、宿主重启连带回收本次调用内的进程与 job 等；拒绝理由作为工具错误回灌模型，引导改做而不是绕过。带 enabled 开关与 allowPatterns 豁免逃生口。",
+  "main": "index.js",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "README.md",
+    "cordis.patch.yml"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "guard",
+    "safety",
+    "denylist",
+    "pre-execute",
+    "tool-guard",
+    "shell",
+    "destructive-commands"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

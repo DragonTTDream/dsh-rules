@@ -48,4 +48,13 @@ enforced_by: [guard]
 
 ## 四、参考实现
 
-`L3-guards/tool-guard/`（待发布，见根 README 路线图）。
+[`tool-guard/`](tool-guard/) —— 单文件判别器（`index.js`）、配置示例、117 项陷阱用例矩阵。
+
+```bash
+cd L3-guards/tool-guard
+npm i                    # 只依赖 DSH 自带的 schema 库
+node test/matrix.mjs     # 117 项，全绿才算没退化
+```
+
+改判别器的唯一规矩：**先跑矩阵**。矩阵红了要先弄清是"规则变严了（该更新用例）"
+还是"判别器坏了（该修代码）"——两者看起来一样，处理方式相反。
