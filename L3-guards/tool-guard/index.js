@@ -48,7 +48,9 @@ export const Config = z.object({
   denyBackgroundSubagent: z.boolean(),
   requireUserAuthForRestart: z.boolean(),
   denyParallelHeavy: z.boolean(),
-  denyAskWhileAnalyzing: z.boolean(),  snapshotSlot: z.string(),
+  denyAskWhileAnalyzing: z.boolean(),
+  planFile: z.string(),
+  denyWritesWhilePlanDraft: z.boolean(),  snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
 });
@@ -93,6 +95,11 @@ const DEFAULTS = {
   // 2026-10-22 用户令：他还在分析/看方案时，模型不许把方案收敛成选择题逼他拍板
   //（实测反例：用户正在权衡三条路，模型直接问「走哪条？」）
   denyAskWhileAnalyzing: true,
+  // 2026-10-22（社区：Claude Code Plan Mode 的权限降级 / Cline Plan&Act / Spec Kit 分阶段）：
+  // 方案文件存在且 status: draft ⇒ 禁一切改盘动作，只允许只读侦察与写方案。
+  // 批准必须是用户给的：status: approved 且记录了逐字用户消息，未记录一律当 draft。
+  planFile: "~/.dsh/plans/active.md",
+  denyWritesWhilePlanDraft: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   snapshotTargets: [
     "~/.dsh/profiles", "~/.dsh/skills", "~/.dsh/skillsets", "~/.dsh/AGENTS.md",
@@ -613,6 +620,7 @@ export function isRestartAuthorized(userText) {
 
 const HOLD_CUE = /(先别|还没定|我先看|我看看|正在(分析|看|读|想)|不急|等我说|别急|想想再说|待定)/;
 const PUSHBACK = /(走哪条|选哪条|哪一条|哪个方案|选一个|挑一条|要我选|你来定)/;
+const PLAN_LEVEL = /(迁出|迁移|删除|清理|处置|归档|移走|范围|批量|授权|清单|隔离区)/;
 const ONE_WAY = /\[one-way\]|【单行道】|不可逆/;
 const TWO_WAY = /\[two-way\]|【双行道】|可逆决策/;
 const HAS_DEFAULT = /默认[:：]|不回复就|不问就/;
@@ -639,6 +647,12 @@ export function askGate({ userText = "", question = "", options = "", enabled = 
     return `用户还在分析（本轮消息：「${u.slice(0, 80)}」）。**现在什么也别问**：给材料、写取舍、按默认路径推进（可逆就先做）。等他明确要你定或要你动手。`;
   }
 
+  // 方案层决定：不看可逆性，一律不许自决、也不许此刻问
+  if (PLAN_LEVEL.test(q)) {
+    return "这是**方案层**决定（做什么/改什么/删什么/范围多大），不是执行细节：**不许自决，也不许现在问**。\n"
+      + "把取舍、代价、回退、不做什么写成方案，**等用户看完表态**；他批准后，方案内部的执行细节（先做哪个、用哪条命令）才轮到你自己定。";
+  }
+
   const oneWay = ONE_WAY.test(q);
   const twoWay = TWO_WAY.test(q);
   const hasDefault = HAS_DEFAULT.test(q);
@@ -653,6 +667,38 @@ export function askGate({ userText = "", question = "", options = "", enabled = 
     return ASK_TEMPLATE + (PUSHBACK.test(q) ? "\n（且你这次问的是「走哪条」，本身就是把决定权推回去。）" : "");
   }
   return undefined; // [one-way] + 默认值 ⇒ 放行
+}
+
+
+/** 解析计划文件状态。返回 { exists, status, approved, scope }。 */
+export function planState(path) {
+  try {
+    const text = readFileSync(path, "utf8");
+    const m = text.match(/^---\n([\s\S]*?)\n---/);
+    const fm = m ? m[1] : "";
+    const status = (fm.match(/^status:\s*(\w+)/m) || [, "draft"])[1];
+    const approvedAt = (fm.match(/^approved_at:\s*(\S+)/m) || [, ""])[1];
+    const approvedMsg = (fm.match(/^approved_msg:\s*(.+)$/m) || [, ""])[1].trim();
+    const scope = (fm.match(/^scope:\s*(.+)$/m) || [, ""])[1].trim();
+    // 自批不算批：approved 但没有记录用户逐字消息 ⇒ 视为 draft
+    const approved = status === "approved" && Boolean(approvedAt) && Boolean(approvedMsg);
+    return { exists: true, status: approved ? "approved" : "draft", approved, scope, raw: status };
+  } catch { return { exists: false, status: "none", approved: false, scope: "" }; }
+}
+
+const STATE_CHANGING = /\b(rm|rmdir|mv|cp|sed\s+-i|truncate|dd|install|git\s+(commit|push|reset|checkout|revert)|systemctl|tee)\b/;
+
+/** 计划未定稿时该不该拦这次动作。纯函数。 */
+export function planGate({ name = "", cmd = "", plan = { exists: false }, enabled = true } = {}) {
+  if (!enabled) return undefined;
+  if (!plan.exists || plan.approved) return undefined;
+  const isWriteTool = name === "write" || name === "edit";
+  const isShellWrite = name === "bash" && STATE_CHANGING.test(String(cmd || ""));
+  const isRun = name === "arbitrate_run";
+  if (!isWriteTool && !isShellWrite && !isRun) return undefined;
+  return "方案还没定稿（`~/.dsh/plans/active.md` 里 status: draft）⇒ **禁止改盘**，只做只读侦察与写方案。"
+    + "把取舍、代价、回退、不做什么写完，等用户看完说批准；拿到批准后把 status 改成 approved 并写上 approved_msg（用户逐字原话），才允许执行。"
+    + "（社区做法：Claude Code Plan Mode 在计划期关闭全部写操作；Cline Plan/Act 分模式；Spec Kit 把 implement 拆成单独一步。）";
 }
 
 export function restartGate({ cmd = "", userText = "", enabled = true } = {}) {
@@ -804,6 +850,15 @@ export function apply(ctx, config = {}) {
       }
     }
 
+    if (cfg.denyWritesWhilePlanDraft !== false) {
+      const pf = String(cfg.planFile || "~/.dsh/plans/active.md");
+      const abs = pf.startsWith("~") ? `${process.env.HOME || "/home/loong"}${pf.slice(1)}` : pf;
+      const gPlan = planGate({
+        name, cmd: String(exec?.arguments?.command ?? exec?.arguments?.script ?? ""),
+        plan: planState(abs),
+      });
+      if (gPlan) return gPlan;
+    }
     if (name === "ask_user_question" && cfg.denyAskWhileAnalyzing !== false) {
       const a = exec?.arguments && typeof exec.arguments === "object" ? exec.arguments : {};
       const qs = Array.isArray(a.questions) ? a.questions : [];
