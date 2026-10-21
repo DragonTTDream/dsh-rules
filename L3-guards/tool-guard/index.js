@@ -39,6 +39,8 @@ export const Config = z.object({
   requireSnapshot: z.boolean(),
   autoSnapshot: z.boolean(),
   maxAutoSnapshotBytes: z.number(),
+  nudgeDelegationAfter: z.number(),
+  nudgeTodoAfterBash: z.number(),
   snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -78,6 +80,11 @@ const DEFAULTS = {
   // 只对已存在的普通文件生效；目录、超大文件、不存在的路径仍走拒绝 + 路标。
   autoSnapshot: false,
   maxAutoSnapshotBytes: 8388608,
+  // 软提示（deny-once-then-reset）：0 = 关。
+  // 依据：2026-10-21 实测一次 42 分钟会话，bash 97 次灌进 681 KB 工具结果、
+  //   subagent 调用 0 次、todo_write 只 1 次 —— 提示层判据在长任务里不生效。
+  nudgeDelegationAfter: 0,
+  nudgeTodoAfterBash: 0,
   snapshotSlot: "~/.dsh/snapshots/latest",
   // 宿主消费集：运行中的服务 / profile 启动时加载 / 每步注入的指令
   snapshotTargets: [
@@ -484,6 +491,20 @@ export function apply(ctx, config = {}) {
   const allow = cfg.allowPatterns.map((p) => new RegExp(p));
   const disposeAllow = (cfg.disposeAllow || []).map(expand);
   const enabled = cfg.enabled !== false;
+  // 软提示计数器（进程内，随会话生命周期）
+  const nudgeDeleg = Number(cfg.nudgeDelegationAfter) || 0;
+  const nudgeTodo = Number(cfg.nudgeTodoAfterBash) || 0;
+  let sinceDelegate = 0;
+  let bashSinceTodo = 0;
+  const DELEGATE_HINT =
+    "连续 %N% 次工具调用没有派过子代理。R-15 的判据是「会往主上下文灌进多少」：" +
+    "工具结果 >200 KB / 单次 bash 输出 >5 万字节 / 同一目标 ≥3 条互不依赖的探针 ⇒ 必须派。" +
+    "派活照 templates/delegate.md 三段填（范围 / 判据 / 输出 schema）。" +
+    "本条是软提示：计数已重置，下一次放行——但请先用 subagent 或 subagent_fork 把读入量挪出去。";
+  const TODO_HINT =
+    "连续 %N% 次 shell 调用没有更新任务卡片。长回合里卡片会停在开局版本" +
+    "（实测 42 分钟会话只更新过 1 次）。先 todo_write 再说：把当前进度与下一步写进去。" +
+    "本条是软提示：计数已重置，下一次放行。";
   const slot = expand(cfg.snapshotSlot);
   const autoSnap = cfg.autoSnapshot === true;
   const maxAutoSnapBytes = Number(cfg.maxAutoSnapshotBytes) || 8388608;
@@ -495,6 +516,25 @@ export function apply(ctx, config = {}) {
 
   const log = (line) => {
     appendFile(logFile, `${new Date().toISOString()} ${line}\n`, () => {}); // 异步 fire-and-forget
+  };
+
+  // 软提示：计数器维护 + 命中阈值时返回提示语（deny-once-then-reset）
+  const bump = (toolName) => {
+    if (nudgeDeleg > 0) {
+      if (toolName === "subagent" || toolName === "subagent_fork") sinceDelegate = 0;
+      else {
+        sinceDelegate += 1;
+        if (sinceDelegate >= nudgeDeleg) { sinceDelegate = 0; return DELEGATE_HINT.replace("%N%", nudgeDeleg); }
+      }
+    }
+    if (nudgeTodo > 0) {
+      if (toolName === "todo_write") bashSinceTodo = 0;
+      else if (toolName === "bash" || toolName === "pwsh") {
+        bashSinceTodo += 1;
+        if (bashSinceTodo >= nudgeTodo) { bashSinceTodo = 0; return TODO_HINT.replace("%N%", nudgeTodo); }
+      }
+    }
+    return undefined;
   };
 
   const check = (exec) => {
@@ -522,7 +562,7 @@ export function apply(ctx, config = {}) {
       }
     }
 
-    if (!isShell && !isArb) return undefined; // 窄面（判据 2）
+    if (!isShell && !isArb) { bump(name); return undefined; } // 窄面（判据 2）：非 shell 只维护计数
 
     const cmd = isShell ? exec?.arguments?.command : exec?.arguments?.script;
     if (typeof cmd !== "string" || !cmd) return undefined;
@@ -551,7 +591,7 @@ export function apply(ctx, config = {}) {
       const vars = collectVars(cmd);
     for (const s of segs) { const r = destructive(s, disposeAllow, vars); if (r) return r; }
     }
-    return undefined;
+    return bump(name);
   };
 
   // guard 必须同步；自身出错一律 fail-open，绝不因防线故障锁死生产

@@ -27,6 +27,10 @@
         denyPkillF: true               # 按完整命令行匹配的进程查询与杀灭（自匹配）
         denyRestartWithBackground: true
         denyRestartInScript: true
+        # ── 软提示（deny-once-then-reset，0 = 关）──────────────────────
+        # 依据：42 分钟会话 bash 97 次灌进 681 KB、subagent 0 次、todo_write 1 次
+        nudgeDelegationAfter: 20   # 连续 N 次工具调用没派子代理 ⇒ 提示一次
+        nudgeTodoAfterBash: 20     # 连续 N 次 shell 调用没更新任务卡片 ⇒ 提示一次
 
         # ── 快照闸门（规则 R-12 的机制层兜底）──────────────────────────
         # 语义：要写「被正在运行的东西消费的产物」⇒ 快照位里必须有该目标的快照，
