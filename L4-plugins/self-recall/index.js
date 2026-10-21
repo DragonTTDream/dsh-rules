@@ -415,7 +415,7 @@ export function apply(ctx, config = {}) {
         "## 串行资源仲裁（self-recall）",
         `本会话的模型由按需装载的 provider 服务（${host}${tgt ? `，模型 ${tgt}` : ""}，约 ${cfg.modelGB}GB 常驻内存）。需要大内存的后台任务与该模型共存会互相挤占内存。`,
         "- **触发判据（硬，看到就触发，不必等用户提醒）**：预计单条命令要跑 >60 秒 —— 编译 / 重建 / 大下载 / 语音转写 / 批量识图 / 大文件校验与哈希 / 长文生成 / 任何要等磁盘大读的活 —— **必须用 `arbitrate_run` 提交，禁止直接 bash 前台跑**。多个任务尽量合并进一次窗口，回归的 30–45 秒只付一次。",
-        "- 提交这类任务只用 `arbitrate_run`：卸载模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回，无需用户发起对话。**装卸对象 = 本会话当前用的那个本地模型**（按会话路由解析，`config.localModels` 内任一命中即用；跟随你会话里选的纯文本/弹性条目，不写死一条）。",
+        "- 提交这类任务只用 `arbitrate_run`：卸载模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。**`timeoutSec` 硬上限 900 秒**（超出会被插件压到 900，返回体 `capSec` 告诉你实际值）：更长的活拆窗，每窗留一个中间 marker。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回，无需用户发起对话。**装卸对象 = 本会话当前用的那个本地模型**（按会话路由解析，`config.localModels` 内任一命中即用；跟随你会话里选的纯文本/弹性条目，不写死一条）。",
         "- `arbitrate_run` 在 marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型（返回 `warmMs`/`warmOk`），provider 装载的 30–45 秒吃在工具调用里，用户下一条消息直接命中热模型；连续跑重活时传 `warm:false` 省这段时间。",
         "- **待回归兜底（插件保证，不靠自觉，四层闭环）**：`arbitrate_run` 卸载成功即落盘 pending 标记。**① 任务脚本自带回归**（插件在脚本头部注入 EXIT trap：任务一退出就卸 auxModels 并发 1 token 装回主模型，与 harness 是否放弃这次调用无关）；**② 插件定时器**每 `pendingScanMs` 毫秒检查 pending，任务进程已退出就补 warm（会话空闲无请求也照跑）；**③ 回合开始前**（`agent/pre-step`）检查 pending 补 warm；**④ 超时分支**补判迟到 marker 与任务进程状态。**任务进程还在跑时四层全部绝不装回**（串行独占不破）。`arbitrate_warm` 成功也会清掉标记。",
         "- 任务脚本必须写 marker（成功和失败都要写，格式 `marker=<值>`）。**早退三态**：`script-died`（进程退了没写 marker）/ `no-start`（压根没起来）/ `stall`（活着但日志静默 `stallMinutes`）——都不再干等到超时；返回体的 `reason`/`died`/`stall`/`quietSec` 会告诉你是哪种。**脚本不要 `exec` 重定向自己的 stdout** —— 插件已把 stdout 接进 job.log，抢走 stdout 会让 marker 永远读不到（2026-10-14 实测踩过）。",
@@ -487,11 +487,11 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_run",
-    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。",
+    description: "串行执行一个需要大内存的后台任务：卸载本地模型 → setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
     parameters: {
       script: { type: "string", required: true, description: "要执行的 bash 脚本内容。约定：结束时 echo 'marker=<值>'。" },
       label: { type: "string", description: "短标签，用于命名工作目录（默认 job）。" },
-      timeoutSec: { type: "number", description: "最长等待秒数，默认 900，上限 3600。" },
+      timeoutSec: { type: "number", description: "最长等待秒数，默认 900，**上限 900（超出会被压到 900）**。更长的活拆窗。" },
       unload: { type: "boolean", description: "是否先卸载模型，默认 true。" },
       warm: { type: "boolean", description: "任务结束后是否自动回归并预热：先按「谁卸谁」卸掉 config.auxModels，再发 1 token 请求触发 provider 装载，把装载耗时吃在本工具调用里。默认取 config.warmAfterRun；马上还要接着跑重活时传 false。" },
     },
@@ -502,6 +502,7 @@ export function apply(ctx, config = {}) {
         properties: {
           marker: { type: "string", required: true, description: "脚本写出的 marker；空串表示没等到。" },
           reason: { type: "string", required: true, description: "marker | marker-late | script-died | no-start | stall | timeout" },
+          capSec: { type: "number", required: true, description: "本次实际生效的等待上限（硬上限 900）" },
           died: { type: "boolean", required: true, description: "进程退出却没写 marker" },
           stall: { type: "boolean", required: true, description: "进程活着但日志静默" },
           quietSec: { type: "number", required: true, description: "日志静默了多少秒" },
@@ -520,7 +521,10 @@ export function apply(ctx, config = {}) {
       render: renderJson,
     },
     async execute({ script, label, timeoutSec, unload, warm }) {
-      const cap = Math.min(Math.max(Number(timeoutSec) || 900, 30), 3600);
+      // 2026-10-22 用户令：硬压 900 秒。规则「timeoutSec ≤900」变成机制，
+      // 不再依赖模型自觉。更长的活必须拆窗（每次窗口留一个中间 marker）。
+      const CAP_MAX_SEC = 900;
+      const cap = Math.min(Math.max(Number(timeoutSec) || 900, 30), CAP_MAX_SEC);
       const tag = String(label || "job").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "job";
       const dir = join(tmpdir(), `arbitrate-${tag}-${Date.now()}`);
       await mkdir(dir, { recursive: true });
@@ -622,6 +626,7 @@ export function apply(ctx, config = {}) {
       return {
         marker,
         reason,
+        capSec: cap,
         died: reason === "script-died" || reason === "no-start",
         stall: reason === "stall",
         timedOut: reason === "timeout",
