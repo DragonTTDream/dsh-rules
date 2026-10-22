@@ -44,6 +44,8 @@ BLACKLIST=(
   '(API_KEY|SECRET|PASSWORD|TOKEN)='  # 密钥赋值
   'credentials\.yaml|vault/'          # 凭据路径
   '@[a-z0-9-]+\.(com|cn|io|dev)'      # 邮箱/账号
+  'session-[0-9a-f]{8}-'              # DSH 会话目录（2026-10-23：事故档曾把会话 id 写进仓）
+  '\bses_[A-Za-z0-9]{10,}'            # opencode 会话 id（\b 防 cases_unparsable 误伤）
 )
 # 白名单：示例与占位符
 ALLOW='example\.com|localhost|127\.0\.0\.1:port'

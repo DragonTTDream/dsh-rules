@@ -3,15 +3,19 @@
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号按"规则集语义"走。
 
 ## [v0.7] — 2026-10-23
-
 ### 新增
 - **R-16 长任务保底与空转收尾**：长任务开局 `create_goal`（带 `max_goal_rounds`）；下一步必须落成工具调用；
-  压缩后第一轮先重述再动作；怀疑"停了"用 `~/.local/bin/stall-check` 指名到 turn/step。
+  压缩后第一轮先重述再动作；怀疑"停了"用 `bin/stall-check` 指名到 turn/step。
 
 ### 修复
 - 事故 `INC-2026-10-23-reasoning-only-stall`：压缩后模型只回 14 token reasoning 就结束回合，
   会话静默停 53 分钟（`turn/end` reason=completed，无 tool 块）。社区同类：Copilot CLI #3239、
   OpenHands SDK #3992、Stop Hook Auto-Continue Pattern。
+- **去标识化闸门**：`bin/lint.sh` 黑名单新增两条：`session-[0-9a-f]{8}-`（DSH 会话目录）与
+  `\bses_[A-Za-z0-9]{10,}`（opencode 会话 id，`\b` 防 `cases_unparsable` 误伤）。
+  起因：事故档曾把会话 id 与项目名写进公开仓，而旧黑名单只覆盖 IP / 家目录 / 密钥。
+- 仓库历史清理：`plans/` 与 `交接-*.md` 从**全部历史**移除，事故档历史版本去标识化
+  （`git filter-branch` + 强推）。本仓今后不再含会话工作态。
 
 ## [v0.6] — 2026-10-21
 
