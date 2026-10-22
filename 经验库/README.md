@@ -128,3 +128,19 @@ grep -i "引号" ~/.dsh/gotchas/INDEX.md
 |---|---|---|
 | 2026-10-22 | 建立本库 + 2 条 + L0 一行指针 | 三次栽在"引号切路径"同一维度；缺一个按症状检索的落点 |
 | 2026-10-22 | 记录"计划门死锁"事故 | 全局单计划文件 + 命令文本粗匹配 ⇒ 连修它的命令都被拦（见 incidents/） |
+
+## 外部参考（借结构，不抄正文）
+
+社区早有等价物。**抄它们的正文 = 每轮 token 税且文化不同**；我们只借「结构的形状」。
+
+| 参考 | 借什么结构 | 什么时候看 |
+|---|---|---|
+| [Model or Harness? 失败定位分类](https://arxiv.org/html/2607.28802v1) | **先判失败该归给模型还是载体**（见 [防复发规格.md](防复发规格.md) 第 3 步） | 想不清"该改 prompt 还是改守卫"时 |
+| [Why Do Multi-Agent LLM Systems Fail?（MAST）](https://arxiv.org/pdf/2503.13657) | 多步/多智能体任务的失败按「分解 / 协调 / 验证」归因 | 任务跑飞但单步都对 |
+| [awesome-agents-md](https://github.com/khasky/awesome-agents-md) | **core 常驻 + rules 按需加载**的分层对照 | 怀疑自己的 L0/L1/L2 分层是否有公认形状 |
+| [anthropics/skills](https://github.com/anthropics/skills) | `skills/<name>/SKILL.md` 的标准结构（frontmatter=何时命中） | 新建/改造 L2 技能时 |
+| [failure-modes.dev/library](https://failure-modes.dev/library) | 事故按「什么坏了 / 怎么级联 / 该带走什么」拆 | 写 `incidents/` 复盘时 |
+
+**本机的增量在哪**（这些社区没有现成等价物，别指望抄）：
+L3 守卫（`ctx.tools.guard` 上的计划门/卡片门/重复门）、单槽资源仲裁与 `arbitrate_run`、
+`经验库` 的「症状→判据→正解 + verify_cmd」形态、以及一切带本机阈值的数字（14336 字节 / 900 秒 / effort=max）。
