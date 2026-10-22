@@ -9,7 +9,7 @@ const build = (cfg = {}) => {
   let guard = null;
   apply(
     { tools: { guard: (fn) => { guard = fn; return () => {}; } }, effect: () => {}, logger: { info: () => {} } },
-    { logFile: `/tmp/bgsub-${process.pid}-${Date.now()}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 0, ...cfg },
+    { logFile: `/tmp/bgsub-${process.pid}-${Date.now()}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, repeatDenyAt: 0, stallAt: 0, requireTodoEveryMinutes: 0, ...cfg },
   );
   return guard;
 };

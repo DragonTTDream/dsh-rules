@@ -10,7 +10,7 @@ const build = (cfg = {}) => {
   let g = null;
   apply(
     { tools: { guard: (fn) => { g = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-    { logFile: `/tmp/tg-${process.pid}-${Math.random().toString(36).slice(2)}.log`, requireSnapshot: false, hostServices: [], planFile: "/tmp/none-plan-x.md", ...cfg },
+    { logFile: `/tmp/tg-${process.pid}-${Math.random().toString(36).slice(2)}.log`, stallAt: 0, repeatDenyAt: 0, requireSnapshot: false, hostServices: [], planFile: "/tmp/none-plan-x.md", ...cfg },
   );
   return g;
 };
@@ -50,7 +50,7 @@ console.log("=== 只读侦察不计数，也不会被拦 ===");
 
 console.log("=== 时间维度的门（改盘 ≥2 才触发，避免误伤）===");
 {
-  const g = build({ requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 10 });
+  const g = build({ requireTodoEveryMutations: 0, requireTodoEveryMinutes: 10 });
   check(edit(g) === undefined, "只改盘 1 次、超时也不拦");
   edit(g);
   const r = edit(g);

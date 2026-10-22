@@ -56,6 +56,7 @@ export const Config = z.object({
   repeatDenyAt: z.number(),
   repeatWindowMinutes: z.number(),
   repeatExempt: z.string(),
+  stallAt: z.number(),
   denyWritesWhilePlanDraft: z.boolean(),  snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -114,7 +115,9 @@ const DEFAULTS = {
   gotchaIndex: "~/.dsh/gotchas/INDEX.md",
   repeatDenyAt: 3,
   repeatWindowMinutes: 30,
-  repeatExempt: "bin/lint|bin/plugin-tests|git (status|diff|log|show)|^cat |^ls ",  
+  repeatExempt: "bin/lint|bin/plugin-tests|git (status|diff|log|show)|^cat |^ls ",
+  // 2026-10-22 FM-1.5（MAST：不知道何时该停）：同一文件连续写出相同内容 = 空转。
+  stallAt: 3,
   denyWritesWhilePlanDraft: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   snapshotTargets: [
@@ -689,6 +692,30 @@ export function askGate({ userText = "", question = "", options = "", enabled = 
 /** 解析计划文件状态。返回 { exists, status, approved, scope }。 */
 
 /** 命令归一化指纹：数字→N、折叠空白、去引号差异。同一"形状"得同一指纹。 */
+
+/** 内容短哈希（djb2）：用于判断"写了等于没写"。 */
+export function contentHash(text) {
+  let h = 5381;
+  const s = String(text || "");
+  for (let i = 0; i < s.length; i += 1) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(16);
+}
+
+/**
+ * 停滞闸（FM-1.5）：同一目标连续 at 次写入内容不变 ⇒ 空转，拦。
+ * history: [{ target, hash }]（旧→新），返回拦截消息或 undefined。纯函数。
+ */
+export function stallGate({ target = "", content = "", history = [], at = 3, enabled = true } = {}) {
+  if (!enabled || !target) return undefined;
+  const h = contentHash(content);
+  const same = (history || []).filter((e) => e && e.target === target).slice(-(at - 1));
+  const allSame = same.length === at - 1 && same.every((e) => e.hash === h);
+  if (!allSame) return undefined;
+  return `停滞：${target} 最近 ${at} 次写入内容完全相同（哈希 ${h}）——写了等于没写。` +
+    `按 FM-1.5「不知道何时该停」先停手：说明这次改动的**判据**是什么、要看到哪个输出才算进展；` +
+    `如果本来就不需要改，别动文件。`;
+}
+
 export function commandFingerprint(cmd) {
   return String(cmd || "")
     .replace(/"[^"]*"/g, '"S"').replace(/'[^']*'/g, "'S'")
@@ -823,6 +850,7 @@ export function apply(ctx, config = {}) {
   let todoFingerprint = "";
   let mutSinceTodo = 0;
   let todoBlocks = 0;
+  const writeHistory = new Map();   // `${agentId}\0${target}` → [{target, hash}]
   const cmdCounts = new Map();   // `${agentId}\0${fingerprint}` → {count, at}（按 id 而非对象，防对象重建后丢失）
   const gotchaPath = expand(cfg.gotchaIndex);
   const repeatExemptRe = cfg.repeatExempt ? new RegExp(cfg.repeatExempt.trim().replace(/\s+$/, ""), "i") : null;
@@ -982,6 +1010,24 @@ export function apply(ctx, config = {}) {
             + "（实测：50 次改盘只更新过 1 次卡片，且那次还发生在 5 次改盘之后。）";
         }
         mutSinceTodo += 1;
+      }
+    }
+    // ── FM-1.5 停滞闸：同一文件连续写出相同内容 ⇒ 空转 ──────────────────────
+    {
+      const isWrite = name === "write" || name === "edit";
+      if (isWrite && Number(cfg.stallAt) > 0) {
+        const a = exec?.arguments ?? {};
+        const target = String(a.file_path ?? a.path ?? "");
+        const content = String(a.content ?? a.new_string ?? "");
+        if (target) {
+          const agentId = String(exec?.agent?.id ?? exec?.agent?.sessionId ?? exec?.agentId ?? "default");
+          const key = agentId + "\0" + target;
+          const hist = writeHistory.get(key) || [];
+          const gStall = stallGate({ target, content, history: hist, at: Number(cfg.stallAt) });
+          hist.push({ target, hash: contentHash(content) });
+          writeHistory.set(key, hist.slice(-8));
+          if (gStall) return gStall;
+        }
       }
     }
     // ── L3 版经验库触发器：同一命令形状重复 ⇒ 拦 + 附命中的经验库行 ──────────

@@ -13,7 +13,7 @@ const build = (name, cfg = {}) => {
     { tools: { guard: (fn) => { guard = fn; return () => {}; } }, effect: () => {}, logger: { info: () => {} } },
     {
       logFile: `${ROOT}/${name}.log`,
-      requireSnapshot: false, repeatDenyAt: 0,
+      requireSnapshot: false, repeatDenyAt: 0, stallAt: 0,
       disposeAllow: ["/tmp"],
       hostServices: [],
       ...cfg,

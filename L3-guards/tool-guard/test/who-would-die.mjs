@@ -32,11 +32,19 @@ console.log("=== 守卫拒绝消息里带「会命中谁」 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/who-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, hostServices: [] },
+  { logFile: `/tmp/who-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, stallAt: 0, hostServices: [] },
 );
 const msg = String(guard({ name: "bash", arguments: { command: `kill $(pgrep -f "self-recall-smoke-UNIQUE")` } }) || "");
 check(msg.includes("会命中这些进程") || msg.includes("当前没有进程的 cmdline 含该模式"), "拒绝消息里有「会命中谁」段");
 check(msg.includes("proc_kill") && msg.includes("proc_list"), "并指向 proc_kill / proc_list 的正确路径");
+
+// 负样本：不用模式挑进程的写法（pidof / 精确 pid）⇒ 不该触发这条拒绝
+{
+  const ok1 = guard({ name: "bash", arguments: { command: "pidof sleep" } });
+  check(ok1 === undefined, "负样本：pidof（按名取 pid）不拦");
+  const ok2 = guard({ name: "bash", arguments: { command: "kill 12345" } });
+  check(ok2 === undefined || !String(ok2).includes("会命中这些进程"), "负样本：精确 pid kill 不走该规则");
+}
 
 console.log(`\n失败 ${fail}`);
 console.log(fail === 0 ? "WHO-WOULD-DIE GREEN" : "WHO-WOULD-DIE RED");

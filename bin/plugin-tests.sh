@@ -17,6 +17,15 @@ run() {
 }
 for t in "$HOME"/dsh-self-recall/test/*.mjs; do run "self-recall/$(basename "$t" .mjs)" node "$t"; done
 for t in "$ROOT"/L3-guards/tool-guard/test/*.mjs; do run "guard/$(basename "$t" .mjs)" node "$t"; done
+# 每条守卫能力都应有负样本（防复发规格第四节：删掉这条，哪条检查会红）
+miss=0
+for t in "$ROOT"/L3-guards/tool-guard/test/*.mjs; do
+  case "$(basename "$t")" in matrix.mjs|vars-and-redaction.mjs) continue;; esac
+  grep -qE '负样本|: 0 ⇒|: false|enabled: false|不拦' "$t" || { echo "FAIL $(basename "$t") 缺负样本断言"; miss=1; }
+done
+[ "$miss" = 0 ] && echo "OK 守卫测试负样本齐全" || status=1
+
 echo
 [ "$status" -eq 0 ] && echo "PLUGIN TESTS GREEN" || echo "PLUGIN TESTS RED"
 exit $status
+

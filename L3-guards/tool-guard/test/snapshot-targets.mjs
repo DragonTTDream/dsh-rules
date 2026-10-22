@@ -39,5 +39,12 @@ for (const [cmd, want, why] of CASES) {
   else { fail += 1; console.log(`  ✗ ${why}\n      cmd=${cmd}\n      want=${JSON.stringify(want)}\n      got =${JSON.stringify(got)}`); }
 }
 console.log(`\n总计 ${CASES.length} 项，失败 ${fail}`);
+// 负样本：只读命令的写入点集必须为空（不该触发快照闸）
+{
+  const ro = shellWriteTargets("ls -la");
+  if (ro.length === 0) console.log("  ✓ 负样本：ls -la 无写入点");
+  else { fail += 1; console.log(`  ✗ 负样本：ls -la 竟有写入点 ${JSON.stringify([...ro])}`); }
+}
+
 console.log(fail === 0 ? "TARGETS GREEN" : "TARGETS RED");
 process.exit(fail === 0 ? 0 : 1);

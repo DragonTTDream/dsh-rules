@@ -52,7 +52,7 @@ console.log("=== 接入守卫：draft 期写盘被拦 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 0, planFile: mk("status: draft\nsession: s1\nscope: 接入测试") },
+  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, repeatDenyAt: 0, stallAt: 0, requireTodoEveryMinutes: 0, planFile: mk("status: draft\nsession: s1\nscope: 接入测试") },
 );
 const g = guard({ name: "bash", arguments: { command: "git commit -m x" }, agent: { id: "s1" } });
 check(typeof g === "string" && g.includes("方案还没定稿"), "本会话 draft ⇒ 拦下并说明方案未定稿");

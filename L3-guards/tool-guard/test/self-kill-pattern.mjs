@@ -45,5 +45,11 @@ check(r.includes("pidof") || r.includes("comm="), "理由里给了合法形态")
 check(r.includes("R-07"), "理由里指了规则编号");
 
 console.log(`\n失败 ${fail}`);
+// 负样本：按名取 pid（pidof）不带模式挑选 + kill，不该按自匹配拦
+{
+  const view = guard({ name: "bash", arguments: { command: "pidof sleeep" } });
+  check(view === undefined, "负样本：pidof 按名取 pid ⇒ 不拦");
+}
+
 console.log(fail === 0 ? "SELF-KILL GREEN" : "SELF-KILL RED");
 process.exit(fail === 0 ? 0 : 1);

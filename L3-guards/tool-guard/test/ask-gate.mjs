@@ -32,7 +32,7 @@ console.log("=== 接入守卫 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/ask2-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, hostServices: [] },
+  { logFile: `/tmp/ask2-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, stallAt: 0, hostServices: [] },
 );
 const A = { id: "s-A" };
 noteUserText(A, "把这三条路的取舍写清楚");

@@ -44,7 +44,7 @@ console.log("=== 接入守卫：第 3 次同形状命令被拦 ===");
   let g2 = null;
   apply(
     { tools: { guard: (fn) => { g2 = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-    { logFile: `/tmp/gg-${process.pid}.log`, requireSnapshot: false, hostServices: [],
+    { logFile: `/tmp/gg-${process.pid}.log`, requireSnapshot: false, stallAt: 0, hostServices: [],
       requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0, planFile: "/tmp/none-plan-gg.md",
       gotchaIndex: "/tmp/gotchas-index-test.md", repeatDenyAt: 3, repeatExempt: "bin/lint" },
   );

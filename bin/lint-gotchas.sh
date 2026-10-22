@@ -35,6 +35,7 @@ for f in "$DIR"/*.md; do
   fl=$(grep -oP '^fault_layer:\s*\K\w+' "$f" | head -1)
   case "$fl" in model|harness|interaction) ;; *) red "$b 缺或错的 fault_layer（model|harness|interaction）";; esac
   grep -q '^fault_why:' "$f" || red "$b 缺 fault_why（一句话说明该在哪层修）"
+  grep -qE '^strength:\s*(must|should|never)' "$f" || red "$b 缺 strength（must|should|never）"
 
   # ③ 过期判定（review = verify；过 SLA 即降级）
   if [ -n "$va" ]; then
@@ -63,8 +64,24 @@ for f in "$DIR"/*.md; do
   fi
 done
 
+# ⑦ 条目总数上限（防膨胀硬指标）
+total=$(ls "$DIR"/*.md | grep -vcE 'INDEX|README|写法规格|防复发规格')
+[ "$total" -le 20 ] || red "条目数 ${total} 超过 active 上限 20（按防复发规格第六节要合并/下沉/删除）"
+
+# ⑧ INDEX 的「按归属层看」统计必须与文件实际一致
+idx="$DIR/INDEX.md"
+if [ -f "$idx" ]; then
+  for layer in model harness interaction; do
+    actual=$(grep -l "^fault_layer: $layer" "$DIR"/*.md 2>/dev/null | grep -vcE 'INDEX|README|写法规格|防复发规格' || true)
+    claimed=$(awk '/^## 按归属层看/{f=1} f' "$idx" | grep -oP "\| \`$layer\` \| \K\d+" | head -1)
+    if [ -n "$claimed" ] && [ "$claimed" != "$actual" ]; then
+      red "INDEX 归属统计不一致：$layer 声称 ${claimed}，实际 ${actual}"
+    fi
+  done
+fi
+
 if [ "$fail" = 0 ]; then
-  echo "OK 经验库规格检查全绿（$(ls "$DIR"/*.md | wc -l) 个文件）"
+  echo "OK 经验库规格检查全绿（$(ls "$DIR"/*.md | wc -l) 个文件，条目 $total 条）"
 else
   echo "GOTCHAS LINT RED"
 fi

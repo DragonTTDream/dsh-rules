@@ -8,7 +8,7 @@ apply(
   {
     logFile: "/tmp/dsh-guard-test/tiers.log",
     requireSnapshot: false,
-    requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 0,
+    requireTodoEveryMutations: 0, repeatDenyAt: 0, stallAt: 0, requireTodoEveryMinutes: 0,
     disposeAllow: ["/tmp", "/var/tmp", "~/.dsh-work"],
   },
 );
