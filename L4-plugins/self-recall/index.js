@@ -44,6 +44,11 @@ export const Config = z.object({
   pendingScanMs: z.number().min(5000).step(1000),
   failFastSec: z.number().min(0).step(1),
   stallMinutes: z.number().min(0).step(1),
+  // 2026-10-23：窗口的硬上限。timeoutSec 降级成**软预算**（到点只记进度、继续等），
+  //   只有到 hardCapSec 才真的把 timeout 交还给调用方。0 = 不设硬上限（只靠 marker / 进程死 / stall 收尾）。
+  hardCapSec: z.number().min(0).step(60),
+  // 串行护栏：窗口已返回但作业仍活 ⇒ 掐断 owner 会话的下一步，只放回 arbitrate_wait。
+  orphanGuard: z.boolean(),
   // 判断层（2026-10-22 用户裁定 v3）：默认不卸 ⇒ 窗口内按实测内存升档卸载
   escalate: z.boolean(),
   memSampleMs: z.number().min(2000).step(1000),
@@ -80,6 +85,8 @@ const DEFAULTS = {
   pendingScanMs: 20000,
   failFastSec: 8,      // 进程没了且无 marker ⇒ 8 秒判失败（下限 3）
   stallMinutes: 10,
+  hardCapSec: 3600,    // 窗口硬上限 1 小时；到点才返回 timeout（软预算 900s 不再交还控制权）
+  orphanGuard: true,   // 窗口返回而作业仍活 ⇒ 下一步只许 arbitrate_wait（否则又变成两个本地客户端抢引擎）
   // 判断层 v4（2026-10-22 用户裁定）：默认不卸 ⇒ 窗口内**实测余量掉多少**才升档卸载。
   //   判据 = 相对窗口起点的**降幅**（不是绝对余量）：连续 escalateStreak 次采样降幅 ≥ escalateDropMB
   //   ⇒ 这活真在吃本机内存 ⇒ 当场卸（任务照跑）。本机余量常年 2.7–3.7 GB（低于任何绝对线），
@@ -345,14 +352,19 @@ export function sessionFactFrom(messages, at = Date.now(), turn = 0) {
   return null;
 }
 
-export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 0, elapsed = 0, failFast = 8, stallMin = 10, cap = 900 } = {}) {
+export function pollDecision({ marker = "", alive = true, size = -1, quietSec = 0, elapsed = 0, failFast = 8, stallMin = 10, cap = 900, hardCap = 0 } = {}) {
   if (marker) return { done: true, reason: "marker" };
   const ff = Math.max(Number(failFast) || 0, 3);
   if (!alive && elapsed >= ff) return { done: true, reason: size <= 0 ? "no-start" : "script-died" };
-  if (elapsed >= cap) return { done: true, reason: "timeout" };
   const sm = Number(stallMin) || 0;
   if (sm > 0 && quietSec >= sm * 60) return { done: true, reason: "stall" };
-  return { done: false, reason: "" };
+  // 2026-10-23 用户令：**窗口必须等任务完成**。软预算（cap）到点绝不交还控制权——
+  //   调用方会话往往就跑在同一条本地推理序列上，提前还回去 = 两个本地客户端分时抢引擎。
+  //   2026-10-23 06:24 实测：窗口 900s 返回后 reused 98%→0，每次请求预填充从 2s 变成 44–51s。
+  //   只有 hardCap 到点才返回 timeout（hardCap=0 ⇒ 不设硬上限，靠 marker/进程死/stall 收尾）。
+  const hc = Number(hardCap) || 0;
+  if (hc > 0 && elapsed >= hc) return { done: true, reason: "timeout" };
+  return { done: false, reason: "", softCapHit: Number(cap) > 0 && elapsed >= Number(cap) };
 }
 
 
@@ -497,6 +509,56 @@ export function markerIn(file) {
   catch { return ""; }
 }
 
+// ── 串行护栏（2026-10-23 用户令）──────────────────────────────────────────────
+// 事故形态：窗口到点返回了，作业进程却还在跑 ⇒ 主对话恢复生成，两边分时抢同一条推理序列
+//   （实测 reused 98%→0，每次请求预填充 2s→44–51s）。窗口自己"等完"是第一道闸；
+//   这一道管"万一还是返回了"：识别出「窗口已返回 + 进程仍活 + 没写 marker」的作业，
+//   当场掐断 owner 会话的下一步，只放它回到 arbitrate_wait 的等待里。
+export function orphanJobs(records, { now = Date.now(), graceSec = 5, alive = () => false, markerOf = () => "" } = {}) {
+  const out = [];
+  for (const r of records || []) {
+    if (!r || !r.jobId || !r.windowReturnedAt) continue;              // 窗口还没返回 ⇒ 正常在跑，不管
+    const returnedAt = Number(r.windowReturnedAt);
+    if (!Number.isFinite(returnedAt)) continue;                        // 时间戳坏了 ⇒ 宁漏不误掐
+    if (now - returnedAt < Number(graceSec || 0) * 1000) continue;     // 刚返回，留一个呼吸窗口
+    if (String(markerOf(r) || "") !== "") continue;                  // 已写出 marker ⇒ 收尾了
+    if (alive(r) !== true) continue;                                 // 进程已退出 ⇒ 不是孤儿
+    out.push(r);
+  }
+  return out;
+}
+
+/** 会话身份（owner 判定用）：同一 agent 对象跨钩子稳定。 */
+export function agentKey(a) {
+  try { return String(a?.session?.id || a?.id || ""); } catch { return ""; }
+}
+
+/** 窗口返回时把结论写进作业记录：之后靠这个字段识别「返回了但没跑完」。 */
+export async function markWindowReturned(cfg, jobId, reason, elapsedSec) {
+  const f = join(jobDirOf(cfg), `${jobId}.json`);
+  try {
+    const rec = JSON.parse(await readFile(f, "utf8"));
+    await writeFile(f, JSON.stringify({ ...rec, windowReturnedAt: Date.now(), windowReason: String(reason || "timeout"), windowElapsedSec: Math.round(Number(elapsedSec) || 0) }), "utf8");
+  } catch { /* 记录不在/写不进 ⇒ 护栏退化成只能靠人工查，不影响主流程 */ }
+}
+
+/** 同步版作业读取（tools.guard 是同步接口）。 */
+function syncJobs(cfg) {
+  const dir = jobDirOf(cfg);
+  let names = [];
+  try { names = readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const f of names) if (f.endsWith(".json")) {
+    try { out.push(JSON.parse(readFileSync(join(dir, f), "utf8"))); } catch { /* 坏文件跳过 */ }
+  }
+  return out;
+}
+
+/** 作业 owner（提交时写侧车；老作业没有 ⇒ 判为"无主"，护栏不掐任何人）。 */
+function readOwner(cfg, jobId) {
+  try { return String(readFileSync(join(jobDirOf(cfg), `${jobId}.owner`), "utf8")).trim(); } catch { return ""; }
+}
+
 /** 等脚本 EXIT trap 写出 self-recall-warm=<code> [ms=<毫秒>]（后台 subshell，可能晚于 marker 几十秒）。 */
 async function waitScriptWarm(file, maxSec = 120) {
   const t0 = Date.now();
@@ -631,6 +693,18 @@ description: 需要大内存的后台任务（转写/编译/大文件处理/批�
 - 并行不会更快，只会互相抢显存/内存。锁文件：\`~/.dsh/arbitrate/window.lock\`（进程死即陈旧）。
 - 要清掉窗口按身份杀（见下节），不要按命令行模式挑进程。
 
+## 窗口必须等任务跑完（软预算 → 硬上限 → 护栏）
+
+- \`timeoutSec\`（≤900）是**软预算**：到点只往 job.log 写一条进度，窗口**继续等**。任务没完就把控制权
+  交还主对话 ⇒ 主对话往往也在同一条本地推理序列上，两边分时抢引擎（实测 reused 98%→0、预填充 2s→44–51s）。
+- 真正的收尾只有三条：拿到 marker / 进程退出（script-died、no-start）/ 空转（stall，由 job.log 大小 +
+  工作目录 mtime + 进程树 CPU 三路判活）。硬上限 \`hardCapSec\`（默认 3600，0=不设）到点才返回 timeout。
+- **串行护栏**：万一窗口还是先返回了（stall / 硬上限），作业记录被打上 \`windowReturnedAt\`；此后 owner 会话的
+  工具调用除 \`arbitrate_wait\` 等白名单外全部被拒，拦截文案直接给出 \`arbitrate_wait({jobId, waitSec:300})\`
+  ⇒ 结构上只能回到等待。判据全来自磁盘与 /proc，不看调用自报。
+- \`arbitrate_wait\` 只看 \`waitSec\` 与进程是否还活：活着就返回 \`running\`（done=false），继续等，
+  **不再被窗口 deadline 提前掐断**。
+
 ## 重跑治理（按失败类型三分）
 
 | 上次失败类型 | 处理 |
@@ -676,6 +750,8 @@ export function apply(ctx, config = {}) {
     // 2026-10-22：以下键此前只加了 schema 与 DEFAULTS，**漏进这个白名单解析器** ⇒ 配置覆盖被静默忽略。
     failFastSec: num(config.failFastSec, DEFAULTS.failFastSec, 0),
     stallMinutes: num(config.stallMinutes, DEFAULTS.stallMinutes, 0),
+    hardCapSec: num(config.hardCapSec, DEFAULTS.hardCapSec, 0),
+    orphanGuard: config.orphanGuard !== false,
     escalate: config.escalate !== false,
     memSampleMs: num(config.memSampleMs, DEFAULTS.memSampleMs, 2000),
     escalateStreak: num(config.escalateStreak, DEFAULTS.escalateStreak, 1),
@@ -784,6 +860,36 @@ export function apply(ctx, config = {}) {
     return res;
   });
   ctx.effect(() => () => disposePending(), "self-recall: dispose pre-step listener");
+  // ── 串行护栏（2026-10-23 用户令）：窗口返回了但作业还活 ⇒ 只许回到等待 ─────────────
+  // 判据全部来自磁盘与 /proc（作业记录里的 windowReturnedAt、pid 存活、日志里有没有 marker），
+  // 不由被拦的调用自报；只掐 owner 会话，不动别人的活。
+  const ORPHAN_ALLOW = new Set(["arbitrate_wait", "arbitrate_status", "arbitrate_warm",
+    "proc_list", "proc_kill", "todo_write", "session_facts", "ask_user_question"]);
+  try {
+    if (cfg.orphanGuard !== false && ctx.tools?.guard) {
+      const disposeOrphan = ctx.tools.guard((exec) => {
+        try {
+          if (ORPHAN_ALLOW.has(String(exec?.name || ""))) return undefined;
+          const me = agentKey(exec?.agent);
+          if (!me) return undefined;
+          const hits = orphanJobs(syncJobs(cfg), {
+            graceSec: 5,
+            alive: (r) => procInfo(Number(r.pid)).alive,
+            markerOf: (r) => markerIn(String(r.logPath || join(String(r.dir || ""), "job.log"))),
+          }).filter((r) => readOwner(cfg, r.jobId) === me);
+          if (hits.length === 0) return undefined;
+          const r = hits[0];
+          const age = Math.round((Date.now() - Number(r.windowReturnedAt)) / 1000);
+          log?.warn?.(`self-recall: 串行护栏拦截 tool=${exec?.name}（作业 ${r.jobId} 窗口已返回 ${age}s，pid ${r.pid} 仍活）`);
+          return `【串行护栏】作业 ${r.jobId} 的窗口已返回（${r.windowReason || "?"}，${age}s 前），但进程仍活着（pid ${r.pid}），本机推理序列还被它占着。`
+            + `下一步只允许 arbitrate_wait({jobId:"${r.jobId}", waitSec:300}) 循环，直到它写出 marker 或进程退出；`
+            + `确实要终止它才用 proc_kill({jobId:"${r.jobId}"})（需用户授权）。其它工具本回合暂停。`;
+        } catch (e) { log?.warn?.(`self-recall: orphan guard error: ${e?.message ?? e}`); return undefined; }
+      });
+      ctx.effect(() => disposeOrphan, "self-recall: dispose orphan guard");
+      log?.warn?.("self-recall: 串行护栏已注册（窗口返回而作业仍活 ⇒ 只放回 arbitrate_wait）");
+    }
+  } catch { /* 老版本没有 tools.guard ⇒ 退化成只靠人工查 */ }
 
   // ── 1c) 定时器兜底（R4）：不依赖任何请求 ──────────────────────────────────
   // 结构性缺口：pre-step 是请求驱动的接缝，会话空闲 + 模型离线 ⇒ harness 里没有任何东西会点火。
@@ -845,7 +951,7 @@ export function apply(ctx, config = {}) {
         `本会话模型按需装载（${host}${tgt ? `，${tgt}` : ""}，约 ${cfg.modelGB}GB 常驻），本地重活与它抢内存。`,
         "- **触发（硬，不用等提醒）**：预计 >60 秒的本机重活（编译 / 重建 / 大下载 / 转写 / 批量识图 / 大文件哈希 / 等磁盘大读）⇒ 必须 `arbitrate_run`，禁止 bash 前台跑；多个任务合并进一次窗口。",
         "- **`lane` 必写**：本机重活 `lane:\"heavy\"`（起跑即卸）；远端主机测试 / ssh·scp 编排 `lane:\"remote\"`（永不卸，立即返回 jobId，结果用 `arbitrate_wait` 取）；**等本机 worker 不要起等待窗口**，直接循环 `arbitrate_wait(<workerJobId>, waitSec≤300)`（持有回合、不生成）；不确定则省略（实测降幅兜底）。旧写法 `unload:true/false` 等价 heavy/remote。",
-        "- `timeoutSec` ≤900（超出被压到 900，返回体 `capSec` 给实际值）；更长的活拆窗，每窗留中间 marker。",
+        "- `timeoutSec` ≤900 是**软预算**：到点只往 job.log 记一条进度，窗口继续等；真正的硬上限是 `hardCapSec`（默认 3600，0=不设）。**任务没完就不许把控制权交还主对话**——主对话往往也在同一条本地推理序列上，交还即两个本地客户端分时抢引擎（2026-10-23 06:24 实测：reused 98%→0，预填充 2s→44-51s）。",
         "- **脚本必须写 `marker=<值>`（成功失败都写），不要把 stdout 重定向走**（插件已接进 job.log）。返回体 `reason` 给三态：script-died / no-start / stall。",
         "- marker 到手自动回归（卸 auxModels → 预热主模型）；连着跑重活传 `warm:false` 省时间。中途中断由插件四层兜底补 warm，任务在跑时绝不装回。",
         `- 红线看 \`arbitrate_status\`：MemAvailable ≥${freeGB}GB 自由跑，≥${floorGB}GB 降档/拆窗。红线只管降档，**卸不卸由 lane 决定**；**始终给用户留 ≥${floorGB}GB 轻量办公余量**。`,
@@ -1047,12 +1153,12 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_run",
-    description: "串行执行一个后台任务。**卸不卸由任务分类 `lane` 决定**：`lane:\"heavy\"`（本地编译/重建/大下载/转写/大文件哈希）⇒ 起跑即卸（预防性腾 48 GB，不等实测）；`lane:\"remote\"`（远端主机测试 / ssh·scp 编排 / 远端探针）⇒ 永不卸、**且立即返回 jobId**。**等本机 worker 的纯等待不属于 remote**：不要起等待窗口，用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环（持有回合、不生成）（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）；省略 ⇒ 起跑不卸 + 插件按实测降幅兜底（相对起点的降幅连续越阈值 ⇒ 当场卸，任务照跑，跑完装回）→ setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**重跑治理**：同一脚本再提交时，插件带上上次结果（`previous`），按失败类型三分（transient 放行 / intermittent 要 `change` 且限 `attemptBudget` 次 / permanent 直接拒）；连续 `circuitAfter` 次同因失败熔断，要求换方法。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
+    description: "串行执行一个后台任务。**卸不卸由任务分类 `lane` 决定**：`lane:\"heavy\"`（本地编译/重建/大下载/转写/大文件哈希）⇒ 起跑即卸（预防性腾 48 GB，不等实测）；`lane:\"remote\"`（远端主机测试 / ssh·scp 编排 / 远端探针）⇒ 永不卸、**且立即返回 jobId**。**等本机 worker 的纯等待不属于 remote**：不要起等待窗口，用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环（持有回合、不生成）（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）；省略 ⇒ 起跑不卸 + 插件按实测降幅兜底（相对起点的降幅连续越阈值 ⇒ 当场卸，任务照跑，跑完装回）→ setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**重跑治理**：同一脚本再提交时，插件带上上次结果（`previous`），按失败类型三分（transient 放行 / intermittent 要 `change` 且限 `attemptBudget` 次 / permanent 直接拒）；连续 `circuitAfter` 次同因失败熔断，要求换方法。**timeoutSec（≤900）是软预算，不是交还控制权的理由**：到点只在 job.log 记一条进度继续等，硬上限 `hardCapSec`（默认 3600，0=不设）到了才返回 timeout；任务活着且无进展靠 stall 收尾。",
     parameters: {
       script: { type: "string", required: true, description: "要执行的 bash 脚本内容。约定：结束时 echo 'marker=<值>'。" },
       label: { type: "string", description: "短标签，用于命名工作目录（默认 job）。" },
       change: { type: "string", description: "重跑时必须填：上次为什么失败 + 这次改了什么（一行）。首次提交可省略。transient 类失败不要求。" },
-      timeoutSec: { type: "number", description: "最长等待秒数，默认 900，**上限 900（超出会被压到 900）**。更长的活拆窗。" },
+      timeoutSec: { type: "number", description: "软预算秒数，默认 900，**上限 900**；到点不返回、只记进度，继续等到硬上限 hardCapSec（默认 3600）或任务收尾。" },
       lane: { type: "string", enum: ["heavy", "remote"], description: "任务分类（**卸不卸由它决定**）。\n**\"heavy\"＝本地编译 / 重建 / 大下载 / 转写 / 大文件哈希**（本任务要吃 GB 级本机内存）⇒ **起跑即卸**（预防性腾 48 GB，不等实测：本机可用仅 3–4 GB 且 swap 已用满，等实测出降幅再卸就是救火）。\n**\"remote\"＝远端主机的测试 / ssh·scp 编排 / 远端探针** ⇒ **永不卸、立即返回 jobId**（等本机 worker 的等待**不是** remote：它要持有回合，用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环，别起等待窗口）（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）。\n**省略＝未分类** ⇒ 起跑不卸 + 插件按实测降幅兜底（连续越阈值 ⇒ 当场卸）。" },
       unload: { type: "boolean", description: "旧参数，已并入 `lane` 的兼容映射：`true` ⇒ 等价 `lane:\"heavy\"`（起跑即卸）；`false` ⇒ 等价 `lane:\"remote\"`（永不卸）。新提交请用 `lane`。" },
       warm: { type: "boolean", description: "任务结束后是否自动回归并预热：先按「谁卸谁」卸掉 config.auxModels，再发 1 token 请求触发 provider 装载，把装载耗时吃在本工具调用里。默认取 config.warmAfterRun；马上还要接着跑重活时传 false。" },
@@ -1065,7 +1171,8 @@ export function apply(ctx, config = {}) {
           marker: { type: "string", required: true, description: "脚本写出的 marker；空串表示没等到。" },
           reason: { type: "string", required: true, description: "marker | marker-late | script-died | no-start | stall | timeout" },
           jobId: { type: "string", required: true, description: "本次作业身份（proc_kill 用它按组终止，不必搜索进程）" },
-          capSec: { type: "number", required: true, description: "本次实际生效的等待上限（硬上限 900）" },
+          capSec: { type: "number", required: true, description: "本次软预算（≤900）：到点只记进度，不交还控制权" },
+          hardCapSec: { type: "number", required: true, description: "本次硬上限（秒，0=不设）：只有到点才返回 timeout" },
           previous: { type: "string", required: true, description: "同一脚本上一次尝试的 JSON（空串 = 首次）。含 reason/marker/workdir/logTail" },
           attempt: { type: "number", required: true, description: "同一脚本的第几次尝试" },
           rerunDenied: { type: "boolean", required: true, description: "true = 本次因重跑治理被拒，未启动" },
@@ -1091,10 +1198,20 @@ export function apply(ctx, config = {}) {
     async execute({ script, label, timeoutSec, lane, unload, warm, change }, exec) {
       // 2026-10-22 用户令：硬压 900 秒。规则「timeoutSec ≤900」变成机制，
       // 不再依赖模型自觉。更长的活必须拆窗（每次窗口留一个中间 marker）。
+      // 2026-10-23 用户令修正：900s 只是**软预算**。到点不交还控制权（调用方会话往往就压在
+      //   同一条本地推理序列上，交还 = 两个本地客户端分时抢引擎，实测 06:24 后每次请求
+      //   从 2s 预填充退化成 44–51s）；只有 hardCapSec（默认 3600，0=不设）到点才返回 timeout。
       const CAP_MAX_SEC = 900;
       const cap = Math.min(Math.max(Number(timeoutSec) || 900, 30), CAP_MAX_SEC);
+      const hardCap = Math.max(Number(cfg.hardCapSec) || 0, cap);
       const tag = String(label || "job").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 24) || "job";
       const jobId = `${tag}-${Date.now()}`;
+      // owner 身份：窗口返回后若作业还活着，护栏只掐起它的那个会话（2026-10-23）。
+      const ownerKey = agentKey(exec?.agent);
+      try {
+        await mkdir(jobDirOf(cfg), { recursive: true });
+        await writeFile(join(jobDirOf(cfg), `${jobId}.owner`), ownerKey, "utf8");
+      } catch { /* 写不进就不掐任何会话 */ }
       const dir = join(tmpdir(), `arbitrate-${tag}-${Date.now()}`);
       await mkdir(dir, { recursive: true });
       const before = await memInfo();
@@ -1105,7 +1222,7 @@ export function apply(ctx, config = {}) {
         const busy = liveWindowLock(cfg);
         if (busy) {
           return {
-            marker: "", reason: "window-busy", jobId, capSec: cap, died: false, stall: false, timedOut: false,
+            marker: "", reason: "window-busy", jobId, capSec: cap, hardCapSec: hardCap, died: false, stall: false, timedOut: false,
             quietSec: 0, previous: "", attempt: 1, rerunDenied: true, rerunWhy: "window-busy",
             elapsedSec: 0, unloadOk: true, unloadBody: "skipped(已有窗口在跑，未卸载模型)",
             memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
@@ -1134,7 +1251,7 @@ export function apply(ctx, config = {}) {
           logTail: String(prev.logTailTail || "").slice(-600),
         }) : "";
         return {
-          marker: "", reason: "rerun-denied", jobId, capSec: cap, died: false, stall: false, timedOut: false,
+          marker: "", reason: "rerun-denied", jobId, capSec: cap, hardCapSec: hardCap, died: false, stall: false, timedOut: false,
           quietSec: 0, previous: prevJson, attempt, rerunDenied: true, rerunWhy: decision.why,
           elapsedSec: 0, unloadOk: true, unloadBody: "skipped(重跑被拒，未卸载模型)",
           memBeforeMB: before.memAvailableMB, memAfterMB: before.memAvailableMB,
@@ -1194,7 +1311,7 @@ export function apply(ctx, config = {}) {
       let escalateOn = cfg.escalate !== false && gateSkip && kind === "unknown";
       let nextMemAt = Date.now() + memSampleMs, memStrikes = 0, escalated = null, maxDropMB = 0;
       const body = typeof script === "string" ? script : "";
-      await writeFile(sh, (cfg.singleWindow === false || kind === "remote" ? "" : windowLockSnippet(cfg, tag, jobId, dir, out, cap)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
+      await writeFile(sh, (cfg.singleWindow === false || kind === "remote" ? "" : windowLockSnippet(cfg, tag, jobId, dir, out, hardCap || cap)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
       // 单一启动路径：setsid 脱离会话 + 重定向，detached 后 unref，绝不随会话退出
       const runner = spawn("bash", ["-c", `setsid bash ${JSON.stringify(sh)} </dev/null > ${JSON.stringify(out)} 2>&1 &`], {
         cwd: dir,
@@ -1216,7 +1333,7 @@ export function apply(ctx, config = {}) {
           await mkdir(dirname(jobFile), { recursive: true });
           await writeFile(jobFile, JSON.stringify({
             jobId, label: tag, at: Date.now(), kind, dir, logPath: out,
-            capSec: cap, deadlineAt: t0 + cap * 1000, scriptHash, attempt,
+            capSec: cap, hardCapSec: hardCap, deadlineAt: t0 + (hardCap || cap) * 1000, scriptHash, attempt,
           }), "utf8");
         } catch { /* 记不下来也不阻塞返回；arbitrate_wait 会退回按 jobId 猜目录 */ }
         await appendLedger(lfile, {
@@ -1230,7 +1347,7 @@ export function apply(ctx, config = {}) {
           maxDropMB: 0, wastedUnload: false, warmCostMs: 0, warmCostBy: "skipped",
         });
         return {
-          marker: "", reason: "detached", jobId, capSec: cap,
+          marker: "", reason: "detached", jobId, capSec: cap, hardCapSec: hardCap,
           previous: prev ? JSON.stringify({ at: new Date(prev.at || 0).toISOString(), reason: prev.reason, attempt: prev.attempt, workdir: prev.workdir, logTail: String(prev.logTailTail || "").slice(-600) }) : "",
           attempt, rerunDenied: false, rerunWhy: decision.why,
           died: false, stall: false, quietSec: 0, timedOut: false, elapsedSec: 0,
@@ -1249,7 +1366,9 @@ export function apply(ctx, config = {}) {
       const { statSync, readFileSync } = await import("node:fs");
       const failFast = Math.max(Number(cfg.failFastSec) || 0, 3);
       const stallMin = Number(cfg.stallMinutes) || 0;
-      while (Date.now() - t0 < cap * 1000) {
+      let softNoted = false;
+      // 硬上限由 pollDecision 收口；这里不再用 cap 做循环条件（cap 已降级为软预算）。
+      while (hardCap > 0 ? Date.now() - t0 < hardCap * 1000 : true) {
         await sleep(3000);
         try {
           const text = readFileSync(out, "utf8");
@@ -1295,8 +1414,16 @@ export function apply(ctx, config = {}) {
         }
         const d = pollDecision({
           marker, alive: jobAlive(dir), size, quietSec,
-          elapsed: (Date.now() - t0) / 1000, failFast, stallMin, cap,
+          elapsed: (Date.now() - t0) / 1000, failFast, stallMin, cap, hardCap,
         });
+        // 软预算到点：只留一条进度证据（进 job.log，带外可观测），控制权不交还
+        if (!d.done && d.softCapHit && !softNoted) {
+          softNoted = true;
+          try {
+            await appendFile(out, `self-recall: 软预算 ${cap}s 到点，任务仍在跑（elapsed=${Math.round((Date.now() - t0) / 1000)}s, quiet=${quietSec}s, pid=${jobAlive(dir) ? "alive" : "gone"}）⇒ 继续等，硬上限 ${hardCap || "∞"}s\n`, "utf8");
+          } catch { /* 写不进也不影响 */ }
+          log?.warn?.(`self-recall: 软预算 ${cap}s 到点仍存活（${tag}）⇒ 继续等，不在运行中间交还控制权`);
+        }
         if (d.done) {
           if (d.reason === "marker") { reason = "marker"; break; }
           // 迟到的 marker 比"进程死了"更准确
@@ -1309,6 +1436,8 @@ export function apply(ctx, config = {}) {
         }
       }
       if (reason === "") reason = "timeout";
+      // 护栏的输入：窗口已经返回到调用方，作业却还活着 ⇒ 记下来（stall / 硬上限到点这两个出口）。
+      if (jobAlive(dir)) await markWindowReturned(cfg, jobId, reason, (Date.now() - t0) / 1000);
       // ── 自动回归 + 预热 ─────────────────────────────────────────────
       // 只在 marker 到手后做：marker 没等到 ⇒ 任务可能还在后台跑，此时装回模型 = 违反串行独占。
       // 顺序硬要求：先按「谁卸谁」卸掉重活拉起的辅助模型，再 warm 主模型（辅助模型在场时装主模型会 OOM）。
@@ -1391,6 +1520,7 @@ export function apply(ctx, config = {}) {
         reason,
         jobId,
         capSec: cap,
+        hardCapSec: hardCap,
         previous: prev ? JSON.stringify({ at: new Date(prev.at || 0).toISOString(), reason: prev.reason, attempt: prev.attempt, workdir: prev.workdir, logTail: String(prev.logTailTail || "").slice(-600) }) : "",
         attempt,
         rerunDenied: false,
@@ -1435,7 +1565,7 @@ export function apply(ctx, config = {}) {
           done: { type: "boolean", required: true, description: "任务是否已经结束（marker 到手 / 进程退出 / 超期）" },
           alive: { type: "boolean", required: true, description: "作业进程是否还在跑" },
           marker: { type: "string", required: true },
-          reason: { type: "string", required: true, description: "marker | script-died | timeout | running | job-not-found" },
+          reason: { type: "string", required: true, description: "marker | script-died | running（还活着，拿 waitSec 继续等；done=false）| job-not-found" },
           elapsedSec: { type: "number", required: true },
           quietSec: { type: "number", required: true, description: "日志静默秒数" },
           logTail: { type: "string", required: true },
@@ -1466,7 +1596,7 @@ export function apply(ctx, config = {}) {
       }
       const workdir = String(meta.dir);
       const logPath = String(meta.logPath || join(workdir, "job.log"));
-      const deadlineAt = Number(meta.deadlineAt) || (Date.now() + (Number(meta.capSec) || 900) * 1000);
+      // 观察者的截止线只由 waitSec 决定（deadlineAt 不再参与判停，见下）。
       const capWait = Math.min(Math.max(Number(waitSec) || 0, 0), 300);
       const t0 = Date.now();
       const readAll = () => { try { return readFileSync(logPath, "utf8"); } catch { return ""; } };
@@ -1479,13 +1609,15 @@ export function apply(ctx, config = {}) {
         const alive = jobAlive(workdir);
         if (marker !== "") { reason = "marker"; break; }
         if (!alive) { reason = "script-died"; break; }
-        if (Date.now() > deadlineAt) { reason = "timeout"; break; }
+        // 2026-10-23：deadlineAt 只是**窗口**的软预算，不是观察者的截止线。
+        //   进程还活着就不许提前掐断（老实现一到期就 reason=timeout/done=true ⇒ 调用方无法等它跑完，
+        //   只能回主对话继续生成 ⇒ 两个本地客户端分时抢引擎）。
         if (Math.round((Date.now() - t0) / 1000) >= capWait) { reason = "running"; break; }
         await sleep(2000);
       }
       const aliveEnd = jobAlive(workdir);
       return {
-        jobId: id, done: marker !== "" || !aliveEnd || reason === "timeout", alive: aliveEnd, marker,
+        jobId: id, done: marker !== "" || !aliveEnd, alive: aliveEnd, marker,
         reason, elapsedSec: Math.round((Date.now() - t0) / 1000), quietSec,
         logTail: String(text).split("\n").slice(-40).join("\n"), logPath, workdir,
       };

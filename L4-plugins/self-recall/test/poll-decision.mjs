@@ -32,12 +32,20 @@ check(d({ alive: true, size: 10, quietSec: 599, stallMin: 10, elapsed: 100 }).do
 check(d({ alive: true, size: 10, quietSec: 600, stallMin: 10, elapsed: 700 }).reason === "stall", "整 10 分钟 ⇒ stall");
 check(d({ alive: true, quietSec: 99999, stallMin: 0 }).done === false, "stallMin=0 ⇒ 关掉，永不判空转");
 
-console.log("=== 真的超时才叫 timeout ===");
-check(d({ alive: true, quietSec: 0, elapsed: 900, cap: 900 }).reason === "timeout", "到 cap ⇒ timeout");
-check(d({ alive: true, quietSec: 300, stallMin: 10, elapsed: 400, cap: 900 }).done === false, "有输出且在 cap 内 ⇒ 继续等");
+console.log("=== 软预算不交还控制权；只有硬上限才 timeout（2026-10-23 用户令）===");
+{
+  const soft = d({ alive: true, quietSec: 0, elapsed: 900, cap: 900, hardCap: 3600 });
+  check(soft.done === false, "到软预算 900s 但任务还活着 ⇒ 继续等（不交还控制权）");
+  check(soft.softCapHit === true, "到软预算 ⇒ softCapHit=true（只记进度）");
+  check(d({ alive: true, quietSec: 0, elapsed: 899, cap: 900, hardCap: 3600 }).softCapHit === false, "软预算内 ⇒ softCapHit=false");
+  check(d({ alive: true, quietSec: 0, elapsed: 3600, cap: 900, hardCap: 3600 }).reason === "timeout", "到硬上限 ⇒ timeout");
+  check(d({ alive: true, quietSec: 0, elapsed: 99999, cap: 900, hardCap: 0 }).done === false, "hardCap=0 ⇒ 不设硬上限，永不 timeout");
+  check(d({ alive: true, quietSec: 300, stallMin: 10, elapsed: 400, cap: 900, hardCap: 3600 }).done === false, "有输出且在软预算内 ⇒ 继续等");
+}
 
 console.log("=== 优先级：死了优先报死，不报 timeout ===");
-check(d({ alive: false, size: 5, elapsed: 900, cap: 900 }).reason === "script-died", "既到 cap 又已死 ⇒ 报 script-died（更有信息量）");
+check(d({ alive: false, size: 5, elapsed: 5000, cap: 900, hardCap: 3600 }).reason === "script-died", "既过硬上限又已死 ⇒ 报 script-died（更有信息量）");
+check(d({ alive: true, quietSec: 600, stallMin: 10, elapsed: 1000, cap: 900, hardCap: 3600 }).reason === "stall", "静默到 stall 线优先于继续等");
 
 console.log("=== 默认值兜底 ===");
 check(d({}).done === false, "空输入 ⇒ 继续等");
