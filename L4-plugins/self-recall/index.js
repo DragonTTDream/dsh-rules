@@ -883,7 +883,10 @@ export function apply(ctx, config = {}) {
           log?.warn?.(`self-recall: 串行护栏拦截 tool=${exec?.name}（作业 ${r.jobId} 窗口已返回 ${age}s，pid ${r.pid} 仍活）`);
           return `【串行护栏】作业 ${r.jobId} 的窗口已返回（${r.windowReason || "?"}，${age}s 前），但进程仍活着（pid ${r.pid}），本机推理序列还被它占着。`
             + `下一步只允许 arbitrate_wait({jobId:"${r.jobId}", waitSec:300}) 循环，直到它写出 marker 或进程退出；`
-            + `确实要终止它才用 proc_kill({jobId:"${r.jobId}"})（需用户授权）。其它工具本回合暂停。`;
+            + `确实要终止它才用 proc_kill({jobId:"${r.jobId}"})（需用户授权）。其它工具本回合暂停。`
+            + (r.windowReason === "stall" && age > 600
+              ? ` 它已被判定空转（日志静默且进程树 CPU 不动），别陪它无限等：提请用户授权后 proc_kill 收尾。`
+              : "");
         } catch (e) { log?.warn?.(`self-recall: orphan guard error: ${e?.message ?? e}`); return undefined; }
       });
       ctx.effect(() => disposeOrphan, "self-recall: dispose orphan guard");
