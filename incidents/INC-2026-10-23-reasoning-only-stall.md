@@ -12,7 +12,7 @@ source: 会话记录取证（turn 38 step 44）+ stall-check 复现
 
 ## 现象
 
-隔壁会话「<项目名>」（`<会话id>`）
+一个长会话（已去标识化：项目名与会话 id 不写进仓）
 05:19:17 之后不动了。用户原话：「怎么停了？」。模型侧当时**以为自己在继续**
 （reasoning 原文：`I need to investigate this further. Let me confirm the details.`），
 实际已经停住；用户一开口，它在 14 秒内就把 `arbitrate_run(a2-worker)` 发了出去。
@@ -27,7 +27,7 @@ source: 会话记录取证（turn 38 step 44）+ stall-check 复现
 | 05:20:11 | 用户「怎么停了？」 | `turn/start`（turn 39） |
 | 05:20:25 | `tool/call arbitrate_run` | a2-worker 提交（距用户发言 14 s） |
 
-复现命令：`~/.local/bin/stall-check <会话id>`
+复现命令：`stall-check <会话id>`（本机适配层；判据见下）
 → `turn=38 step=44 out_tokens=14 「I need to investigate this further...」`
 
 ## 根因

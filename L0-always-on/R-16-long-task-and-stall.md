@@ -18,6 +18,6 @@ enforced_by: [prompt, script]
   收尾 `update_goal complete`；续跑靠 `turn/end` 触发。
 - **下一步必须是工具调用**：不许只写"我要继续"就收尾；回合结束前自检一次。
 - **压缩后第一轮高风险**：先重述任务与下一步，再发动作。
-- **怀疑"停了"别猜**：`~/.local/bin/stall-check [会话id]` 列出"turn/end completed + 无 tool 块 + 输出极小"
+- **怀疑"停了"别猜**：`bin/stall-check [会话id]` 列出"turn/end completed + 无 tool 块 + 输出极小"
   的步；那是**空转收尾**，不是卡死/超时/报错。
 - **判据**：一次"停"要么有 goal 在场，要么被 stall-check 指名到 turn/step。
