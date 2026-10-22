@@ -17,3 +17,6 @@ node_modules/
 dist/
 .DS_Store
 node_modules
+
+# 会话工作态：方案与台账不进公开仓（2026-10-23 用户令）
+plans/
