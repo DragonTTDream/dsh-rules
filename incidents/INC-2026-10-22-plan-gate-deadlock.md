@@ -4,6 +4,7 @@ title: 计划门自锁：修它的写操作被它自己拦住
 since: 2026-10-22
 layer: L3
 severity: high
+fault_layer: harness
 related: [R-02, R-12]
 ---
 
@@ -19,6 +20,10 @@ related: [R-02, R-12]
 
 但**本会话从未创建过计划文件**。更糟的是：**修复这个缺陷的写操作也被同一缺陷拦住**，
 形成鸡生蛋死锁——`cp`、`python -c "...write..."`、`git commit` 全部被拒。
+
+## 级联路径
+
+`全局单文件计划` → `批准判定缺 approved_at` → `守卫禁一切改盘` → **修守卫的写操作也被拦**（自锁）
 
 ## 根因（三件事叠加）
 
@@ -53,3 +58,8 @@ related: [R-02, R-12]
 1. `~/.dsh/plans/active.md` 存在吗？内容是当前任务吗？
 2. 有 `session:` 字段吗？和当前会话一致吗？
 3. 被拒的命令文本里，有没有只是**碰巧包含** `rm`/`cp`/`git commit` 这些词？
+
+## 带走什么
+
+- 可复用判据（已进经验库）：「明明没有 draft 却被拦」⇒ 查计划文件归属与 `session:` 字段
+- 已下沉机制：`planGate` 按会话隔离 + 跨会话负样本用例 `test/plan-gate.mjs`

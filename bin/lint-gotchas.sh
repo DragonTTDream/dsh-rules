@@ -32,6 +32,9 @@ for f in "$DIR"/*.md; do
   sla=$(grep -oP '^verify_sla_days:\s*\K\d+' "$f" | head -1); sla=${sla:-90}
   [ -n "$va" ] || red "$b 缺 verified_at（YYYY-MM-DD）"
   [ -n "$vc" ] || red "$b 缺 verify_cmd（验不了的写 skip 并注明原因）"
+  fl=$(grep -oP '^fault_layer:\s*\K\w+' "$f" | head -1)
+  case "$fl" in model|harness|interaction) ;; *) red "$b 缺或错的 fault_layer（model|harness|interaction）";; esac
+  grep -q '^fault_why:' "$f" || red "$b 缺 fault_why（一句话说明该在哪层修）"
 
   # ③ 过期判定（review = verify；过 SLA 即降级）
   if [ -n "$va" ]; then

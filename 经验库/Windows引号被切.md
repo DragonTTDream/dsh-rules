@@ -4,6 +4,8 @@ verified_at: 2026-10-22
 verify_cmd: skip
 verify_sla_days: 90
 strength: must
+fault_layer: model
+fault_why: 知识缺口：Windows 命令行只有字符串，三层引号解析
 verify_note: 需 Windows 环境（计划任务/命令行解析），本机 Linux 无法执行
 ---
 

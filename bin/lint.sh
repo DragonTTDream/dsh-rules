@@ -125,9 +125,19 @@ else
   say "WARN" "无 python3+yaml，跳过 frontmatter 解析检查"
 fi
 
-# 经验库写法规格（五段/时间戳/SLA/去标识/长度）
+# 经验库写法规格（五段/时间戳/归属/SLA/去标识/长度）
 if [ -x "$(dirname "$0")/lint-gotchas.sh" ]; then
   bash "$(dirname "$0")/lint-gotchas.sh" || fail=1
+fi
+
+# L2 技能 frontmatter（name/description/whenToUse + 预算）
+if [ -x "$(dirname "$0")/lint-skills.sh" ]; then
+  bash "$(dirname "$0")/lint-skills.sh" || fail=1
+fi
+
+# incidents 统一形状（新严旧宽）
+if [ -x "$(dirname "$0")/lint-incidents.sh" ]; then
+  bash "$(dirname "$0")/lint-incidents.sh" || fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi

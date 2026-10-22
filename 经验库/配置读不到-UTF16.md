@@ -4,6 +4,8 @@ verified_at: 2026-10-22
 verify_cmd: bin/gotchas-verify/utf16-config.sh
 verify_sla_days: 90
 strength: must
+fault_layer: model
+fault_why: 知识缺口：文本层与字节层不是同一个东西
 ---
 
 # 配置里明明有值，程序读出来是空（UTF-16LE + BOM）
