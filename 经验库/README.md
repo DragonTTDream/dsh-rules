@@ -15,6 +15,9 @@
 
 ---
 
+**写作标准（必读）**：[写法规格.md](写法规格.md)（11 条硬要求 + 五段模版） · [防复发规格.md](防复发规格.md)（判层四问 + 七步 + 负样本）。
+**维护命令**：`bash bin/lint-gotchas.sh` / `bash bin/lint-gotchas.sh --refresh`。
+
 ## 一、目录与格式
 
 ```
@@ -78,6 +81,8 @@
 | `draft` | 新建，未验证 |
 | `active` | 成功命中并解决过一次 |
 | `archived` | 连续两个会话没被命中 ⇒ 移入 `归档/` |
+
+**过期判定**：`verified_at` 超过 `verify_sla_days` ⇒ lint 报红 ⇒ 降 draft（runbook 类 30 天，其它 90 天）。
 
 **active 上限 20 条**。超了就把最久未命中的降级——否则这里会变成第二份 L0。
 

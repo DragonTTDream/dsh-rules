@@ -1,3 +1,11 @@
+---
+status: active
+verified_at: 2026-10-22
+verify_cmd: bin/gotchas-verify/utf16-config.sh
+verify_sla_days: 90
+strength: must
+---
+
 # 配置里明明有值，程序读出来是空（UTF-16LE + BOM）
 
 ## 症状（下次会冒出来的话）
@@ -34,3 +42,9 @@ file config.ini                                          # → ASCII text
 ## 通用判据（一句话）
 **「肉眼看得见、程序读不到」⇒ 第一件事 `file` + `od -c` 看字节层，别在文本层找 bug。**
 编辑器按 Unicode 解码给你看；grep/cut/awk 按字节匹配，BOM 与 NUL 对它们是真实字符。
+
+## 边界
+
+适用**按字节或单字节 locale** 读取的工具（grep/cut/awk/sed）；消费端支持 `--encoding`/`iconv` 时可直接转码，不必改数据文件。
+只解释「文件里明明有值、程序读不到/读成空」；**不解释**「读到了值但内容不对」（那多半是 CRLF、行尾空格、BOM 残留）。
+不覆盖无 BOM 的 UTF-16（需启发式探测，容易误判，不做）。

@@ -1,6 +1,13 @@
-# Windows引号被切：命令行是字符串，不是 argv
+---
+status: active
+verified_at: 2026-10-22
+verify_cmd: skip
+verify_sla_days: 90
+strength: must
+verify_note: 需 Windows 环境（计划任务/命令行解析），本机 Linux 无法执行
+---
 
-**状态**：active（2026-10-22）
+# Windows引号被切：命令行是字符串，不是 argv
 
 ## 症状
 
@@ -51,3 +58,9 @@ cmd /c ""C:\a b\x.bat""      rem 外层两个双引号是 cmd 的规则
 ## 一句话
 
 **Windows 每个进程只收到一个命令行字符串**（[MS 官方文章](https://learn.microsoft.com/en-us/archive/blogs/twistylittlepassagesallalike/everyone-quotes-command-line-arguments-the-wrong-way)）；能拆成字段就别拼字符串，能放进 bat 就别放进 /TR。
+
+## 边界
+
+只适用 **Windows** 的命令行/计划任务；Linux shell 的引号规则不同，别照搬。
+不含 `.bat` 内部转义全套规则；PowerShell 的参数解析另有规则（见 `$args`/`--%`）。
+只解释「路径含空格 + 进程没起来」，不解释「进程起来了但参数值不对」。

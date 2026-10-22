@@ -125,5 +125,10 @@ else
   say "WARN" "无 python3+yaml，跳过 frontmatter 解析检查"
 fi
 
+# 经验库写法规格（五段/时间戳/SLA/去标识/长度）
+if [ -x "$(dirname "$0")/lint-gotchas.sh" ]; then
+  bash "$(dirname "$0")/lint-gotchas.sh" || fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi
 exit "$fail"
