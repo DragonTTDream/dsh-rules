@@ -12,6 +12,9 @@ modes: [general, chef, stock-analysis-report, video-transcribe-pipeline, comfyui
 skills:
   workspace-hygiene:         { modes: [all], expose: auto }
   process-shell-safety:      { modes: [all], expose: auto }
+  remote-exec:               { modes: [all], expose: auto }   # 命令要离开本机时（ssh/scp/schtasks/远端 .ps1）——与模式无关
+  vault-access:              { modes: [all], expose: auto }   # 取密钥/令牌的唯一入口（dsh-vault CLI 已免密）——与模式无关
+  arbitrate-serial-work:     { modes: [all], expose: auto }   # 2026-10-22：仲裁细节从系统提示词下沉到技能（提示词只留判据）——与模式无关
   debug-discipline:          { modes: [general], expose: auto }   # 只服务通用模式；四个任务模式各有专属工作，不掺调试清单
   code-edit-lane:            { modes: [general], expose: auto }   # ← 现状如此；是否也该进其它模式见 PRESET-SKILLS.md §2.3
   github-axi:                { modes: [general], expose: auto }   # ← 同上
