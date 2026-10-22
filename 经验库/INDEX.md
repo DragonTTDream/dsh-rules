@@ -15,6 +15,7 @@
 | 配置读不到 空值 肉眼看得见 grep^KEY=不中 cat -A见^@ M-^? BOM UTF-16 | `file`+`od -c`：行首 `ff fe`(LE BOM)，字符间夹 `00`(NUL)；锚定匹配必失配 | `iconv -f UTF-16 -t UTF-8`（吃 BOM），别用 `-f UTF-16LE`/裸 `tr -d '\0'` | 2026-10-22 / 90d / auto | [配置读不到-UTF16.md](配置读不到-UTF16.md) |
 | 存活 起没起来 exit0 日志ok 探测不准 $! 跨会话属性丢弃 | 成功判据由被检查的调用自报=不算证据 | 带外三件套：PID+comm+etime / 心跳 mtime / tasklist SESSION | 2026-10-22 / 30d / auto | [成功声明不算证据.md](成功声明不算证据.md) |
 | 中文注释 语法错 变量为空 0x80040005 -2147467259 编码 | 写编码≠解释器读编码（PS5.1 无 BOM 按 GBK） | 脚本正文 ASCII-only，或 UTF-8 BOM，或 pwsh 7 | 2026-10-22 / 90d / manual | [脚本被错误解码.md](脚本被错误解码.md) |
+| 日志没生成 文件空 看不见失败 stdout 黑洞 GUI windowsgui 输出丢了 | 进程起来了但失败没有进程外见证者 | 错误走 stderr/显式 sink；启动器 `> out.log 2>&1`；forbidigo 禁 fmt.Print* | 2026-10-22 / 90d / auto | [输出通道黑洞.md](输出通道黑洞.md) |
 
 ## 维护命令
 
