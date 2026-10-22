@@ -140,5 +140,11 @@ if [ -x "$(dirname "$0")/lint-incidents.sh" ]; then
   bash "$(dirname "$0")/lint-incidents.sh" || fail=1
 fi
 
+# ── 12. 文档体积闸门（照 logrotate：先声明上限，到线触发下沉）──────────
+# 数字在 bin/cap-check.sh 里（本机事实不进 L0 正文，与 R-07 的阈值同法）。
+if [ -x "$ROOT/bin/cap-check.sh" ]; then
+  bash "$ROOT/bin/cap-check.sh" || fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then say "OK" "lint 全绿（$(ls L0-always-on/*.md 2>/dev/null | grep -vc assemble) 条规则）"; fi
 exit "$fail"

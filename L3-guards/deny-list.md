@@ -33,6 +33,13 @@ enforced_by: [guard]
 | G-4 | 重启 + 后台叠加 | 同一条命令里既有服务重启又有后台拉起 | R-07 R-12 |
 | G-5 | 脚本内的重启 | 提交的脚本体里含服务重启 | R-12 |
 | G-6 | 无快照写宿主消费集 | 写入路径命中宿主消费集且无快照：目标是已存在的小文件 ⇒ 自动拍一张再放行；目录 / 超大 / 不存在 ⇒ 拒 | R-12 |
+| G-7 | 写 Windows 脚本含非 ASCII 且无 BOM | `.ps1`/`.bat`/`.cmd` 正文含非 ASCII 且无 `EF BB BF`，或命令行里对它做重定向 / heredoc / `Set-Content` 且含非 ASCII ⇒ 拒（PS 5.1 按 ANSI 码页解 ⇒ 中文粘连成"语法错"） | R-14 |
+| G-8 | 跨机搬运与注册串在一条 `&&` | 命令含 `scp`/`sftp`/`pscp`，又含 `sc create/start/config`、`schtasks /create`、`net start`、`New-Service`，用 `&&` 串起且链里没有对端 `test -f` ⇒ 拒（上游失败被静默跳过） | R-14 |
+| G-9 | 命令行里带明文凭据 | 命中 `Authorization: Bearer <字面>`、`sshpass -p <字面>`、`--password=<字面>`、`URL 里 user:pass@`、`敏感名=字面值` 任一（值为 `$VAR`/`$(...)` 不算）⇒ 拒，指到 `dsh-vault get` | R-14 |
+| G-10 | 去密钥文件里翻值 | `cat`/`grep`/`rg`/`head`/`tail`/`awk`/`sed`/`source`/`. ` 读取 `.env`（模板除外）、`credentials.json`、`.netrc` ⇒ 拒 | R-14 |
+| G-11 | 生成物静态检查（exec 之前） | 脚本 `bash -n` 不通过 ⇒ 拒；段首命令词在 PATH 里查不到 ⇒ 拒；`scp`/`cp` 的**绝对字面源**父目录在而文件不在 ⇒ 拒（远端 `host:path`、含 `$`、含通配、`~`、父目录不存在一律不判）。三档 `off|log|deny`，每次命中落 `~/.dsh/static-check.jsonl` | R-14 |
+
+> §二 表尚未收录后加的五个闸门（`repeatGate` / `stallGate` / `todoGate` / `askGate` / `planGate`），待补。
 
 ## 三、设计要求（这几条比清单本身重要）
 

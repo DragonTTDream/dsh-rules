@@ -6,6 +6,7 @@ verify_sla_days: 90
 strength: must
 fault_layer: model
 fault_why: 知识缺口：文本层与字节层不是同一个东西
+sink_why: "读文件当下才发现；除非对每次配置读取加字节嗅探，否则不可静态判"
 ---
 
 # 配置里明明有值，程序读出来是空（UTF-16LE + BOM）

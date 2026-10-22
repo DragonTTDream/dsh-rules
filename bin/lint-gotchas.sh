@@ -37,6 +37,17 @@ for f in "$DIR"/*.md; do
   grep -q '^fault_why:' "$f" || red "$b 缺 fault_why（一句话说明该在哪层修）"
   grep -qE '^strength:\s*(must|should|never)' "$f" || red "$b 缺 strength（must|should|never）"
 
+  # ②b 条目必须回答「能不能下沉」（2026-10-22 用户令：只攒文档、不进机制 = 每次都要事故三次才纠正）
+  #     sink: 指向已下沉的守卫 / lint（带文件与行号）；sink_why: 为什么不能下沉（要人判断 / 不可静态判）
+  case "$fl" in
+    model|interaction)
+      if ! grep -qE '^sink:' "$f" && ! grep -qE '^sink_why:' "$f"; then
+        red "$b 缺 sink（已下沉到哪：文件:行）或 sink_why（为什么不能下沉）"
+      fi
+      ;;
+  esac
+
+
   # ③ 过期判定（review = verify；过 SLA 即降级）
   if [ -n "$va" ]; then
     days=$(( ( $(date -d "$TODAY" +%s) - $(date -d "$va" +%s) ) / 86400 ))

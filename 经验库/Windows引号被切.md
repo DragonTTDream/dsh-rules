@@ -6,6 +6,7 @@ verify_sla_days: 90
 strength: must
 fault_layer: model
 fault_why: 知识缺口：Windows 命令行只有字符串，三层引号解析
+sink_why: "要解析 schtasks /TR 的引号嵌套，正则误报高，尚未下沉"
 verify_note: 需 Windows 环境（计划任务/命令行解析），本机 Linux 无法执行
 ---
 

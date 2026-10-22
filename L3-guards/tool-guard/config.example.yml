@@ -9,6 +9,60 @@
         logFile: ~/.dsh/tool-guard.log
         allowPatterns: []
 
+        # ── 生成物静态检查（2026-10-22 分级放行）──────────────────────
+        # staticCheckMode: off | log | deny（默认 log = 只落台账，不拦）
+        # staticCheckLogUntil: 灰度到期日。mode=log 且 今天 > 该日 ⇒ 自动按 deny 处置（写坏/留空 ⇒ 不收紧）
+        # 台账：~/.dsh/static-check.jsonl；统计 bin/static-stats.sh；标误报 bin/static-verdict.sh <行号> fp "备注"
+        # 失效症状：改了不生效 ⇒ 先看 effectiveMode 是否已把 log 抬成 deny（今天过了到期日）；
+        #           台账没新行 ⇒ mode 被设成 off，或命中全被脚本里的 `# guard: allow <rule> <原因>` 豁免掉。
+        staticCheckMode: log
+        staticCheckLogUntil: "2026-10-29"
+
+        # ── bash 语法判据：交给 shellcheck（2026-10-23 用户批准）──────────
+        # 开关名与默认值（逐字同名，改哪个生效哪个）：
+        #   shellcheckPath      默认 /home/loong/.local/bin/shellcheck（shellcheck 0.11.0，用户级安装）
+        #   shellcheckSeverity  默认 error —— E 档线：level=error ⇒ E（拦）；warning/info/style ⇒ W（只落台账）
+        #   shellcheckExclude   默认 [] —— 元素形如 "SC2148"（裸数字 "2148" 也认）；剔除逐整脚本生效，台账 excluded 留痕
+        #   shellcheckTimeoutMs 默认 15000 —— 必带超时（实测每次 2ms；2 万行 4.5s ⇒ 5000 会撞线）。
+        #     2026-10-23 缺口3：默认从 5000 抬到 15000；撞线时降级文案写明「超时 Ns（shellcheckTimeoutMs=…，
+        #     本轮默认已抬到 15000）」，现场不会只剩一句 spawn 失败。
+        # 判据边界（实测）：shellcheck 不判破坏性形状（`rm -rf /`、`rm -rf "$dir"`、`rm -rf ${d}/*` 全 0 条）、
+        #   也不判命令存在性（`mkdri` 0 条）⇒ 那两条判据保留自研（G-2 破坏性动词闸 / command-missing / path-missing）。
+        # 降级形态（不静默）：shellcheckPath 不存在/不可执行/spawn 失败/超时 ⇒ 不报错不拦，
+        #   出一条 rule:"shellcheck-missing" 的 W，且拒绝文案里写明「语法判据本轮失明」，台账行带 notices。
+        #   此时 bash 语法回退 `bash -n` 兜底（旧判据保留），且 command-missing / path-missing **照跑**
+        #   （2026-10-23 修：原来回退条会把自研两条一起吞掉）。
+        # 缺口1（非 bash 脚本，无开关）：首行 shebang 的解释器不是 sh/bash/dash/zsh/ksh/env 系
+        #   （例 `#!/usr/bin/env python3`、`#!/usr/bin/node`、`#!/usr/bin/pwsh`）⇒ **跳过 shellcheck**，
+        #   记 rule:"non-bash-shebang" 的 W + notices（"已跳过…非通过"），command-missing / path-missing 照跑。
+        #   实测：python 正文喂 `-s bash -S error` 出 SC1036/SC1088/SC1065 三条噪声 E —— 拦下来就是把
+        #   "解释器不匹配"报成"脚本语法错"。白名单在代码里（SHEBANG_BASH_INTERPRETERS），不是配置键。
+        # 失效症状：①「语法错没拦」⇒ 台账行有没有 rule:"shellcheck-missing"；
+        #   ②「warning 也拦下来了」⇒ shellcheckSeverity 被写成 warning/info/style；
+        #   ③「某个 SC 码不见了」⇒ 它在 shellcheckExclude 里（台账 excluded:[SC…]）；
+        #   ④「python/node 脚本被 shellcheck 拦」⇒ 台账应出现 non-bash-shebang（出现=已跳过，非通过）；
+        #   ⑤「bash 脚本被跳过」⇒ 白名单写漏了名字（改代码，改配置没用）。
+        shellcheckPath: /home/loong/.local/bin/shellcheck
+        shellcheckSeverity: error
+        shellcheckExclude: []
+        shellcheckTimeoutMs: 15000
+
+        # ── pwsh 语法解析器（2026-10-23 缺口修复：真判据）────────────────
+        # 开关名：pwshParser = auto（默认）| off（显式降级，不判）。
+        # auto 的装载路线（本机实测，Node v22.22.2）：**只能动态 import()**——
+        #   require("tree-sitter-powershell") 抛 ERR_REQUIRE_ASYNC_MODULE；
+        #   装载 = 懒加载 promise 缓存（不在 ESM 顶层 await，不阻塞宿主启动；apply 里只"预约"），
+        #   import 有超时预算（DEFAULTS.pwshLoadBudgetMs=2000，非配置键：多一个键会让整份插件配置校验失败）。
+        # 真判据：解析出 ERROR/MISSING 节点 ⇒ E（rule:"syntax"，codes:["TS-ERROR"]，text 带节点类型与行列）。
+        # 三条失效症状（都写成台账行 + notices，绝不静默算通过）：
+        #   ①「pwsh 语法错没拦」⇒ 台账行 rule:"pwsh-no-parser" ⇒ 本轮未参与检查；
+        #   ②「包没装 / 装载失败（架构不匹配、预算内没到、Parser 构造抛错）」⇒ reason 写明 cause 与错误摘要，
+        #      同样落 pwsh-no-parser W，**不是通过**；
+        #   ③「pwshParser 被设成 off」⇒ reason=config off。
+        # 依赖：~/dsh-tool-guard/node_modules 里的 tree-sitter@0.25.1 + tree-sitter-powershell@0.26.4
+        #   （解析器只认插件目录下的 node_modules：在别处 import 同一行会 ERR_MODULE_NOT_FOUND，实测）。
+        pwshParser: auto
+
         # ── 可抛弃区（2026-10-21 新增）────────────────────────────────
         # 这些根下面的「具名子项」允许直接递归强删，不问。
         # 根本身不在此列：删 /tmp 这个根仍然拒。
