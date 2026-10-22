@@ -7,7 +7,7 @@ const fakeCtx = {
   effect: () => {},
   logger: { info: () => {} },
 };
-apply(fakeCtx, { logFile: "/tmp/dsh-guard-test/guard.log", hostServices: ["app.service"], requireSnapshot: false, requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0 });
+apply(fakeCtx, { logFile: "/tmp/dsh-guard-test/guard.log", hostServices: ["app.service"], requireSnapshot: false, requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 0 });
 
 // 2026-10-22：重启类命令现在要求本轮授权；矩阵里的「合法重启」用例先给授权上下文
 setSessionUserText("重启宿主并停服务");

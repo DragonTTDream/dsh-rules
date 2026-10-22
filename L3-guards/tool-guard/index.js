@@ -52,6 +52,10 @@ export const Config = z.object({
   denyParallelHeavy: z.boolean(),
   denyAskWhileAnalyzing: z.boolean(),
   planFile: z.string(),
+  gotchaIndex: z.string(),
+  repeatDenyAt: z.number(),
+  repeatWindowMinutes: z.number(),
+  repeatExempt: z.string(),
   denyWritesWhilePlanDraft: z.boolean(),  snapshotSlot: z.string(),
   snapshotTargets: z.array(z.string()),
   snapshotExempt: z.array(z.string()),
@@ -105,6 +109,12 @@ const DEFAULTS = {
   // 方案文件存在且 status: draft ⇒ 禁一切改盘动作，只允许只读侦察与写方案。
   // 批准必须是用户给的：status: approved 且记录了逐字用户消息，未记录一律当 draft。
   planFile: "~/.dsh/plans/active.md",
+  // 2026-10-22：L3 版经验库触发器。同一条命令（归一化后）在窗口内出现 N 次 ⇒ 拦，
+  // 并把 经验库/INDEX.md 里命中的症状行塞进拒绝消息（模型不用自己想起来去 grep）。
+  gotchaIndex: "~/.dsh/gotchas/INDEX.md",
+  repeatDenyAt: 3,
+  repeatWindowMinutes: 30,
+  repeatExempt: "bin/lint|bin/plugin-tests|git (status|diff|log|show)|^cat |^ls ",  
   denyWritesWhilePlanDraft: true,
   snapshotSlot: "~/.dsh/snapshots/latest",
   snapshotTargets: [
@@ -677,6 +687,58 @@ export function askGate({ userText = "", question = "", options = "", enabled = 
 
 
 /** 解析计划文件状态。返回 { exists, status, approved, scope }。 */
+
+/** 命令归一化指纹：数字→N、折叠空白、去引号差异。同一"形状"得同一指纹。 */
+export function commandFingerprint(cmd) {
+  return String(cmd || "")
+    .replace(/"[^"]*"/g, '"S"').replace(/'[^']*'/g, "'S'")
+    .replace(/\b\d+\b/g, "N")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 解析 经验库/INDEX.md 的表格行。返回 [{ symptom, criterion, fix, file }] */
+export function parseGotchaIndex(text) {
+  const rows = [];
+  for (const line of String(text || "").split("\n")) {
+    if (!line.startsWith("|")) continue;
+    const cells = line.split("|").map((c) => c.trim());
+    if (cells.length < 6) continue;
+    const [, symptom, criterion, fix, , fileCell] = cells;
+    if (!symptom || symptom.includes("症状关键词") || /^-+$/.test(symptom)) continue;
+    const m = String(fileCell || "").match(/\(([^)]+)\)/);
+    rows.push({ symptom, criterion, fix, file: m ? m[1] : "" });
+  }
+  return rows;
+}
+
+/** 按"症状词 vs 命令文本"的共现打分，返回前 max 条。纯函数。 */
+export function matchGotchaRows(cmd, rows, max = 2) {
+  const text = String(cmd || "").toLowerCase();
+  const scored = [];
+  for (const r of rows || []) {
+    const words = String(r.symptom || "").toLowerCase().split(/[\s,，、/|]+/).filter((w) => w.length >= 2);
+    const hits = words.filter((w) => text.includes(w));
+    if (hits.length) scored.push({ row: r, score: hits.length, hits });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, max).map((x) => x.row);
+}
+
+/** 重复命令闸。纯函数：给定指纹出现次数，决定是否拦、拦时附什么。 */
+export function repeatGate({ cmd = "", count = 0, at = 3, rows = [], enabled = true } = {}) {
+  if (!enabled) return undefined;
+  if (!Number.isFinite(at) || at <= 0) return undefined;
+  if (count < at) return undefined;
+  const hits = matchGotchaRows(cmd, rows, 2);
+  const head = `同一条命令已第 ${count} 次出现（窗口内），按 R-14「同一现象第 3 次改判」先停手：不要用同一个写法再试一次。`;
+  if (hits.length) {
+    const body = hits.map((h) => `· 命中经验库：**${h.symptom}**\n  判据：${h.criterion}\n  正解：${h.fix}${h.file ? `\n  详情：${h.file}` : ""}`).join("\n");
+    return `${head}\n\n${body}\n\n要么按上面的正解换维度，要么先说明为什么还需要原样再跑一次。`;
+  }
+  return `${head}\n\n经验库索引里没找到对得上这一条的症状行——用 \`grep -i <症状词> ${"{INDEX}"}\` 自查一次，或先把这次的症状补成一条（R-06）。`;
+}
+
 export function planState(path) {
   try {
     const text = readFileSync(path, "utf8");
@@ -760,7 +822,17 @@ export function apply(ctx, config = {}) {
   let lastTodoAt = Date.now();
   let todoFingerprint = "";
   let mutSinceTodo = 0;
-  let todoBlocks = 0;   // 连续被拦次数：≥2 ⇒ fail-open，绝不让会话卡死
+  let todoBlocks = 0;
+  const cmdCounts = new Map();   // `${agentId}\0${fingerprint}` → {count, at}（按 id 而非对象，防对象重建后丢失）
+  const gotchaPath = expand(cfg.gotchaIndex);
+  const repeatExemptRe = cfg.repeatExempt ? new RegExp(cfg.repeatExempt.trim().replace(/\s+$/, ""), "i") : null;
+  let gotchaRowsCache = { at: 0, rows: [] };
+  const gotchaRows = () => {
+    if (Date.now() - gotchaRowsCache.at < 60000) return gotchaRowsCache.rows;
+    try { gotchaRowsCache = { at: Date.now(), rows: parseGotchaIndex(readFileSync(gotchaPath, "utf8")) }; }
+    catch { gotchaRowsCache = { at: Date.now(), rows: [] }; }
+    return gotchaRowsCache.rows;
+  };   // 连续被拦次数：≥2 ⇒ fail-open，绝不让会话卡死
   try {
     ctx?.on?.("agent/pre-step", async (payload, next) => {
       const t = latestUserText(payload?.messages);
@@ -910,6 +982,28 @@ export function apply(ctx, config = {}) {
             + "（实测：50 次改盘只更新过 1 次卡片，且那次还发生在 5 次改盘之后。）";
         }
         mutSinceTodo += 1;
+      }
+    }
+    // ── L3 版经验库触发器：同一命令形状重复 ⇒ 拦 + 附命中的经验库行 ──────────
+    {
+      const isCmd = name === "bash" || name === "pwsh" || name === "arbitrate_run";
+      const cmdText = String(exec?.arguments?.command ?? exec?.arguments?.script ?? "");
+      const exempt = repeatExemptRe ? repeatExemptRe.test(cmdText) : false;
+      if (isCmd && cmdText && !exempt && Number(cfg.repeatDenyAt) > 0) {
+        const agentId = String(exec?.agent?.id ?? exec?.agent?.sessionId ?? exec?.agentId ?? "default");
+        const fp = commandFingerprint(cmdText);
+        const key = agentId + "\0" + fp;
+        const win = Number(cfg.repeatWindowMinutes) * 60000;
+        const prev = cmdCounts.get(key);
+        const count = prev && Date.now() - prev.at < win ? prev.count + 1 : 1;
+        if (cmdCounts.size > 500) { for (const [k, v] of cmdCounts) if (Date.now() - v.at > win) cmdCounts.delete(k); }
+        cmdCounts.set(key, { count, at: Date.now() });
+        if (process.env.GOTCHA_DEBUG) console.error('[gotcha]', { fp: fp.slice(0,40), count, exempt, at: cfg.repeatDenyAt });
+        const g = repeatGate({ cmd: cmdText, count, at: Number(cfg.repeatDenyAt), rows: gotchaRows() });
+        if (g) {
+          cmdCounts.set(key, { count: 0, at: Date.now() });   // 拦过即清零，避免永久锁死
+          return g;
+        }
       }
     }
     if (name === "ask_user_question" && cfg.denyAskWhileAnalyzing !== false) {

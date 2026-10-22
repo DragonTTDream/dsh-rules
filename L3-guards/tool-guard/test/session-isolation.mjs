@@ -8,7 +8,7 @@ const check = (c, m, e = "") => { if (c) console.log(`  ✓ ${m}`); else { fail 
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/iso-${process.pid}.log`, requireSnapshot: false, hostServices: [] },
+  { logFile: `/tmp/iso-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, hostServices: [] },
 );
 
 const A = { id: "session-A" };

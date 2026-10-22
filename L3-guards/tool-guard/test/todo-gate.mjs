@@ -50,7 +50,7 @@ console.log("=== 只读侦察不计数，也不会被拦 ===");
 
 console.log("=== 时间维度的门（改盘 ≥2 才触发，避免误伤）===");
 {
-  const g = build({ requireTodoEveryMutations: 0, requireTodoEveryMinutes: 10 });
+  const g = build({ requireTodoEveryMutations: 0, repeatDenyAt: 0, requireTodoEveryMinutes: 10 });
   check(edit(g) === undefined, "只改盘 1 次、超时也不拦");
   edit(g);
   const r = edit(g);

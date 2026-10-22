@@ -32,7 +32,7 @@ console.log("=== 守卫拒绝消息里带「会命中谁」 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/who-${process.pid}.log`, requireSnapshot: false, hostServices: [] },
+  { logFile: `/tmp/who-${process.pid}.log`, requireSnapshot: false, repeatDenyAt: 0, hostServices: [] },
 );
 const msg = String(guard({ name: "bash", arguments: { command: `kill $(pgrep -f "self-recall-smoke-UNIQUE")` } }) || "");
 check(msg.includes("会命中这些进程") || msg.includes("当前没有进程的 cmdline 含该模式"), "拒绝消息里有「会命中谁」段");
