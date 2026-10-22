@@ -686,18 +686,23 @@ export function planState(path) {
     const approvedAt = (fm.match(/^approved_at:\s*(\S+)/m) || [, ""])[1];
     const approvedMsg = (fm.match(/^approved_msg:\s*(.+)$/m) || [, ""])[1].trim();
     const scope = (fm.match(/^scope:\s*(.+)$/m) || [, ""])[1].trim();
+    const session = (fm.match(/^session:\s*(\S+)/m) || [, ""])[1].trim();
     // 自批不算批：approved 但没有记录用户逐字消息 ⇒ 视为 draft
     const approved = status === "approved" && Boolean(approvedAt) && Boolean(approvedMsg);
-    return { exists: true, status: approved ? "approved" : "draft", approved, scope, raw: status };
+    return { exists: true, status: approved ? "approved" : "draft", approved, scope, session, raw: status };
   } catch { return { exists: false, status: "none", approved: false, scope: "" }; }
 }
 
 const STATE_CHANGING = /\b(rm|rmdir|mv|cp|sed\s+-i|truncate|dd|install|git\s+(commit|push|reset|checkout|revert)|systemctl|tee)\b/;
 
 /** 计划未定稿时该不该拦这次动作。纯函数。 */
-export function planGate({ name = "", cmd = "", plan = { exists: false }, enabled = true } = {}) {
+export function planGate({ name = "", cmd = "", plan = { exists: false }, session = "", enabled = true } = {}) {
   if (!enabled) return undefined;
   if (!plan.exists || plan.approved) return undefined;
+  // 2026-10-22 修：计划文件是全局单文件，之前会拿**别的会话**的 draft 拦住本会话（实测被拦一次，
+  // 且造成"修这个缺陷的写操作也被同一缺陷拦住"的鸡生蛋死锁）。
+  // 规则：计划声明了 session 且不是本会话 ⇒ 不归我管；没声明 session ⇒ 视为历史文件，不拦。
+  if (!plan.session || plan.session !== session) return undefined;
   const isWriteTool = name === "write" || name === "edit";
   const isShellWrite = name === "bash" && STATE_CHANGING.test(String(cmd || ""));
   const isRun = name === "arbitrate_run";
@@ -862,9 +867,10 @@ export function apply(ctx, config = {}) {
     if (cfg.denyWritesWhilePlanDraft !== false) {
       const pf = String(cfg.planFile || "~/.dsh/plans/active.md");
       const abs = pf.startsWith("~") ? `${process.env.HOME || "/home/loong"}${pf.slice(1)}` : pf;
+      const sid = String(exec?.agent?.id ?? exec?.agent?.sessionId ?? exec?.agentId ?? "");
       const gPlan = planGate({
         name, cmd: String(exec?.arguments?.command ?? exec?.arguments?.script ?? ""),
-        plan: planState(abs),
+        plan: planState(abs), session: sid,
       });
       if (gPlan) return gPlan;
     }

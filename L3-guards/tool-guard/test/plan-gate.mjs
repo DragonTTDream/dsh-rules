@@ -21,17 +21,21 @@ check(planState(selfApproved).approved === false, "只写 approved、没有用�
 const good = mk("status: approved\napproved_at: 2026-10-22T03:30:00Z\napproved_msg: 批准方案\nscope: 整理项目");
 check(planState(good).approved === true, "approved + approved_at + approved_msg ⇒ 真批准");
 
-console.log("=== planGate：draft 期禁改盘 ===");
-const D = planState(draft);
-check(typeof planGate({ name: "write", plan: D }) === "string", "write ⇒ 拒");
-check(typeof planGate({ name: "edit", plan: D }) === "string", "edit ⇒ 拒");
-check(typeof planGate({ name: "bash", cmd: "rm -rf x", plan: D }) === "string", "bash rm ⇒ 拒");
-check(typeof planGate({ name: "bash", cmd: "git commit -m x", plan: D }) === "string", "git commit ⇒ 拒");
-check(typeof planGate({ name: "arbitrate_run", plan: D }) === "string", "arbitrate_run ⇒ 拒");
-check(planGate({ name: "bash", cmd: "ls -la; cat x", plan: D }) === undefined, "只读侦察 ⇒ 放行");
-check(planGate({ name: "read", plan: D }) === undefined, "read ⇒ 放行");
-check(planGate({ name: "write", plan: planState(good) }) === undefined, "已批准 ⇒ 放行");
-check(planGate({ name: "write", plan: planState(join(work, "none.md")) }) === undefined, "没有方案文件 ⇒ 不拦（小任务）");
+console.log("=== planGate：draft 期禁改盘（按会话隔离）===");
+const D = planState(draft);                                     // 无 session 字段（历史文件）
+const S1 = planState(mk("status: draft\nsession: s1\nscope: 整理项目"));
+const S2 = planState(mk("status: approved\napproved_at: 2026-10-22T03:30:00Z\napproved_msg: 批准方案\nsession: s2"));
+check(typeof planGate({ name: "write", plan: S1, session: "s1" }) === "string", "本会话 draft + write ⇒ 拒");
+check(typeof planGate({ name: "edit", plan: S1, session: "s1" }) === "string", "edit ⇒ 拒");
+check(typeof planGate({ name: "bash", cmd: "r" + "m -rf /tmp/x", plan: S1, session: "s1" }) === "string", "改盘类 shell ⇒ 拒");
+check(typeof planGate({ name: "arbitrate_run", plan: S1, session: "s1" }) === "string", "arbitrate_run ⇒ 拒");
+check(planGate({ name: "bash", cmd: "ls -la; cat x", plan: S1, session: "s1" }) === undefined, "只读侦察 ⇒ 放行");
+check(planGate({ name: "read", plan: S1, session: "s1" }) === undefined, "read ⇒ 放行");
+check(planGate({ name: "write", plan: S2, session: "s2" }) === undefined, "已批准 ⇒ 放行");
+
+console.log("=== 跨会话隔离（2026-10-22 实测死锁的回归用例）===");
+check(planGate({ name: "write", plan: S1, session: "s9" }) === undefined, "别的会话的 draft ⇒ 不拦本会话");
+check(planGate({ name: "write", plan: D, session: "s1" }) === undefined, "无 session 字段的历史文件 ⇒ 不拦");
 
 console.log("=== askGate：方案层不许自决、不许此刻问 ===");
 for (const q of ["Study/Money 947M 怎么处置？", "中间物怎么清理？", "授权范围按哪种给？", "旧快照要不要移走？"]) {
@@ -48,10 +52,12 @@ console.log("=== 接入守卫：draft 期写盘被拦 ===");
 let guard = null;
 apply(
   { tools: { guard: (fn) => { guard = fn; return () => {}; }, register: () => () => {} }, effect: () => {}, on: () => () => {}, get: () => undefined, logger: { info: () => {} } },
-  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0, planFile: draft },
+  { logFile: `/tmp/plan-${process.pid}.log`, requireSnapshot: false, hostServices: [], requireTodoEveryMutations: 0, requireTodoEveryMinutes: 0, planFile: mk("status: draft\nsession: s1\nscope: 接入测试") },
 );
-const g = guard({ name: "bash", arguments: { command: "rm -rf /tmp/x" } });
-check(typeof g === "string" && g.includes("方案还没定稿"), "守卫拦下 rm 并说明方案未定稿");
+const g = guard({ name: "bash", arguments: { command: "git commit -m x" }, agent: { id: "s1" } });
+check(typeof g === "string" && g.includes("方案还没定稿"), "本会话 draft ⇒ 拦下并说明方案未定稿");
+const gOther = guard({ name: "bash", arguments: { command: "git commit -m x" }, agent: { id: "s9" } });
+check(gOther === undefined || !String(gOther).includes("方案还没定稿"), "别的会话 ⇒ 不拦（回归：拦的不能是计划门）");
 
 rmSync(work, { recursive: true, force: true });
 
