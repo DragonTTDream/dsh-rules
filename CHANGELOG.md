@@ -2,6 +2,17 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号按"规则集语义"走。
 
+## [v0.7] — 2026-10-23
+
+### 新增
+- **R-16 长任务保底与空转收尾**：长任务开局 `create_goal`（带 `max_goal_rounds`）；下一步必须落成工具调用；
+  压缩后第一轮先重述再动作；怀疑"停了"用 `~/.local/bin/stall-check` 指名到 turn/step。
+
+### 修复
+- 事故 `INC-2026-10-23-reasoning-only-stall`：压缩后模型只回 14 token reasoning 就结束回合，
+  会话静默停 53 分钟（`turn/end` reason=completed，无 tool 块）。社区同类：Copilot CLI #3239、
+  OpenHands SDK #3992、Stop Hook Auto-Continue Pattern。
+
 ## [v0.6] — 2026-10-21
 
 ### 修复

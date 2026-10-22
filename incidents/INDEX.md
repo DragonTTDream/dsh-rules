@@ -17,6 +17,8 @@
 | [INC-2026-10-21-guard-log-leak](INC-2026-10-21-guard-log-leak.md) | 2026-10-21 | verbatim | R-07、R-12 |
 | [INC-2026-10-21-guard-too-blunt](INC-2026-10-21-guard-too-blunt.md) | 2026-10-21 | verbatim | R-03、R-12 |
 | [INC-2026-10-21-snapshot-gate-friction](INC-2026-10-21-snapshot-gate-friction.md) | 2026-10-21 | verbatim | R-12 |
+| [INC-2026-10-22-plan-gate-deadlock](INC-2026-10-22-plan-gate-deadlock.md) | ? | ? | — |
+| [INC-2026-10-23-reasoning-only-stall](INC-2026-10-23-reasoning-only-stall.md) | 2026-10-23 | observed | R-16 |
 
 ## 反向查：某条规则由哪些事故支撑
 
@@ -35,3 +37,4 @@
 - **R-13** ← INC-2026-10-19-loop-pollution.md
 - **R-14** ← INC-2026-09-23-blamed-external.md
 - **R-15** ← INBOX.md
+- **R-16** ← INC-2026-10-23-reasoning-only-stall.md

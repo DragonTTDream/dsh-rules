@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# stall-check —— 找出会话里"空转收尾"的回合（模型只写了 reasoning 就结束，活没干完）。
+#
+# 【为什么需要它】2026-10-23 事故：本地模型在上下文压缩后只输出 14 token 的 reasoning
+#   （"I need to investigate this further..."），没有 tool 调用、没有正文。harness 按
+#   "回合里没有工具调用" 判 turn/end completed ⇒ 会话静默停 53 分钟，直到用户问"怎么停了"。
+#   那一刻模型以为自己在继续，实际已经停了。
+#
+# 判据（三条同时成立才算空转）：
+#   1. 该 turn 的 turn/end reason.kind == "completed"（不是 aborted/max-tokens）
+#   2. 该 turn 最后一条 assistant 消息里没有 tool 块
+#   3. 该消息 outputTokens < --max-tokens（默认 20）
+#
+# 用法:
+#   stall-check                     # 本会话（$DSH_SESSION_ID）
+#   stall-check <session-id>        # 指定会话
+#   stall-check --latest            # 最近修改的会话
+#   stall-check --all               # 扫最近 10 个会话
+# 输出: 每行一处空转（时间 turn step out_tokens 末尾 reasoning 摘要）；末行汇总
+# 退出: 0 = 没有空转；1 = 发现空转；2 = 找不到会话
+import glob, json, os, subprocess, sys, datetime
+
+ARGS = [a for a in sys.argv[1:] if not a.startswith("--")]
+FLAGS = {a for a in sys.argv[1:] if a.startswith("--")}
+MAXTOK = 20
+if "--max-tokens" in sys.argv:
+    try: MAXTOK = int(sys.argv[sys.argv.index("--max-tokens") + 1])
+    except Exception: pass
+    ARGS = [a for a in ARGS if not a.isdigit() or a == ARGS[0]]
+
+def sessions():
+    return sorted(glob.glob(os.path.expanduser("~/.dsh/sessions/*/*/session.v4.jsonl.zstd")),
+                  key=os.path.getmtime, reverse=True)
+
+def resolve():
+    if "--all" in FLAGS: return sessions()[:10]
+    if "--latest" in FLAGS: return sessions()[:1]
+    if ARGS:
+        hits = [p for p in sessions() if f"/{ARGS[0]}/" in p]
+        return hits[:1]
+    sid = os.environ.get("DSH_SESSION_ID")
+    if sid:
+        hits = [p for p in sessions() if f"/{sid}/" in p]
+        if hits: return hits[:1]
+    return sessions()[:1]
+
+def ts(ms): return datetime.datetime.fromtimestamp(ms / 1000).strftime("%m-%d %H:%M:%S")
+
+def scan(path):
+    out = []
+    if not path or not os.path.exists(path): return out
+    try:
+        raw = subprocess.run(["zstd", "-dc", path], capture_output=True, check=False).stdout
+    except Exception:
+        return out
+    turn = None; step = None; last = None; end = None
+
+    def flush():
+        nonlocal turn, step, last, end
+        if turn is None: return
+        if end and end.get("kind") == "completed" and last is not None:
+            parts = last.get("content") or []
+            has_tool = any(p.get("type") == "tool" for p in parts)
+            toks = (last.get("usage") or {}).get("outputTokens")
+            if not has_tool and isinstance(toks, int) and toks < MAXTOK:
+                rsn = ""
+                for p in parts:
+                    if p.get("type") == "reasoning": rsn = (p.get("text") or "").strip()
+                out.append({"turn": turn, "step": step, "tokens": toks,
+                            "time": last.get("_t"), "text": rsn[:110]})
+        turn = None; step = None; last = None; end = None
+
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln: continue
+        try: r = json.loads(ln)
+        except Exception: continue
+        t = r.get("type")
+        if t == "turn/start":
+            flush(); turn = (r.get("data") or {}).get("turn")
+        elif t == "turn/end":
+            end = (r.get("data") or {}).get("reason") or {}
+            flush()
+        elif t == "assistant/message":
+            d = r.get("data") or {}
+            m = dict(d.get("message") or {})
+            m["usage"] = d.get("usage") or {}
+            m["_t"] = r.get("time")
+            last = m; step = d.get("step")
+    flush()
+    return out
+
+targets = resolve()
+if not targets:
+    print("stall-check: 找不到会话存储（~/.dsh/sessions/*/*/session.v4.jsonl.zstd）", file=sys.stderr)
+    raise SystemExit(2)
+
+total = 0
+for path in targets:
+    sid = path.split("/")[-2]
+    hits = scan(path)
+    total += len(hits)
+    for h in hits:
+        print(f"{ts(h['time'] or 0)}  {sid}  turn={h['turn']} step={h['step']}  out_tokens={h['tokens']}  「{h['text']}」")
+    if not hits and len(targets) == 1:
+        print(f"{sid}: 没有空转收尾（判据：turn/end completed + 最后一条 assistant 无 tool 块 + out_tokens<{MAXTOK}）")
+print(f"stall-check: 会话 {len(targets)} 个，空转 {total} 处")
+raise SystemExit(1 if total else 0)
