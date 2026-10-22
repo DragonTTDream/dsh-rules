@@ -17,6 +17,12 @@
 - 仓库历史清理：`plans/` 与 `交接-*.md` 从**全部历史**移除，事故档历史版本去标识化
   （`git filter-branch` + 强推）。本仓今后不再含会话工作态。
 
+- **等待窗口不再是"立即返回"**（self-recall 插件）：`lane:"remote"` 的口径收回到"远端主机活"；
+  等本机 worker 的等待改用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环（持有回合、不生成）。
+  同时修观测链：`windowLockSnippet` 的作业记录补 `dir`/`logPath`/`deadlineAt`，
+  `arbitrate_wait` 增加 jobId→工作目录兜底（此前本地窗口的 wait 恒 `job-not-found`）。
+  ⚠ 插件改动需重启宿主才生效。
+
 ## [v0.6] — 2026-10-21
 
 ### 修复

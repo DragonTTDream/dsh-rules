@@ -391,11 +391,15 @@ export function liveWindowLock(cfg) {
 }
 
 /** 写进任务脚本头部的单窗口锁（pid = 脚本自己的 $$）。 */
-export function windowLockSnippet(cfg, label, jobId = "") {
+export function windowLockSnippet(cfg, label, jobId = "", dir = "", out = "", capSec = 900) {
   const lf = lockFileOf(cfg);
   const jd = jobDirOf(cfg);
   const safe = String(label || "").replace(/["\\]/g, "");
   const jid = String(jobId || label || "job").replace(/["\\]/g, "");
+  // 2026-10-23：作业记录必须带 dir/logPath/deadlineAt —— arbitrate_wait 靠 meta.dir 轮询；
+  //   老版本只写 {jobId,pid,pgid,label,at} ⇒ 本地窗口（heavy/未分类）永远 wait 不到（job-not-found）。
+  const esc = (x) => String(x || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const extra = dir ? `,"dir":"${esc(dir)}","logPath":"${esc(out)}","deadlineAt":${Date.now() + Number(capSec || 900) * 1000}` : "";
   return [
     "# self-recall: 单窗口锁 + 作业身份（pid/pgid 由脚本自己写，之后按组终止）",
     `SR_LOCK=${JSON.stringify(lf)}`,
@@ -403,7 +407,7 @@ export function windowLockSnippet(cfg, label, jobId = "") {
     'SR_PGID=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " ")',
     'mkdir -p "$(dirname "$SR_LOCK")" "$SR_JOBDIR" 2>/dev/null',
     `printf '{"pid":%s,"label":"${safe}","at":%s000}\\n' "$$" "$(date +%s)" > "$SR_LOCK" 2>/dev/null`,
-    `printf '{"jobId":"${jid}","pid":%s,"pgid":%s,"label":"${safe}","at":%s000}\\n' "$$" "\${SR_PGID:-$$}" "$(date +%s)" > "$SR_JOBDIR/${jid}.json" 2>/dev/null`,
+    `printf '{"jobId":"${jid}","pid":%s,"pgid":%s,"label":"${safe}","at":%s000${extra}}\\n' "$$" "\${SR_PGID:-$$}" "$(date +%s)" > "$SR_JOBDIR/${jid}.json" 2>/dev/null`,
     "",
   ].join("\n");
 }
@@ -578,7 +582,7 @@ description: 需要大内存的后台任务（转写/编译/大文件处理/批�
 | 写法 | 含义 | 行为 |
 |---|---|---|
 | \`lane:"heavy"\` | 本地编译 / 重建 / 大下载 / 转写 / 大文件哈希 | **起跑即卸**（预防性），不等实测降幅 |
-| \`lane:"remote"\` | 远端主机测试 / ssh·scp 编排 / 远端探针 / 纯等待 | **永不卸**，立即返回 jobId，不进等待循环、不占单窗口锁；结果用 \`arbitrate_wait\` 取 |
+| \`lane:"remote"\` | 远端主机测试 / ssh·scp 编排 / 远端探针（**等本机 worker 的等待不算 remote**） | **永不卸**，立即返回 jobId，不进等待循环、不占单窗口锁；结果用 \`arbitrate_wait\` 取 |
 | 省略 | 不确定 | 起跑不卸 + 每 \`memSampleMs\` 采样，连续 \`escalateStreak\` 次「相对起点的降幅 ≥ \`escalateDropMB\`」⇒ 当场卸、跑完装回 |
 
 - 旧写法 \`unload:true\` ⇒ heavy，\`unload:false\` ⇒ remote（兼容层）。
@@ -840,7 +844,7 @@ export function apply(ctx, config = {}) {
         "## 串行资源仲裁（self-recall）",
         `本会话模型按需装载（${host}${tgt ? `，${tgt}` : ""}，约 ${cfg.modelGB}GB 常驻），本地重活与它抢内存。`,
         "- **触发（硬，不用等提醒）**：预计 >60 秒的本机重活（编译 / 重建 / 大下载 / 转写 / 批量识图 / 大文件哈希 / 等磁盘大读）⇒ 必须 `arbitrate_run`，禁止 bash 前台跑；多个任务合并进一次窗口。",
-        "- **`lane` 必写**：本机重活 `lane:\"heavy\"`（起跑即卸）；远端主机测试 / ssh·scp 编排 / 纯等待 `lane:\"remote\"`（永不卸，立即返回 jobId，结果用 `arbitrate_wait` 取）；不确定则省略（实测降幅兜底）。旧写法 `unload:true/false` 等价 heavy/remote。",
+        "- **`lane` 必写**：本机重活 `lane:\"heavy\"`（起跑即卸）；远端主机测试 / ssh·scp 编排 `lane:\"remote\"`（永不卸，立即返回 jobId，结果用 `arbitrate_wait` 取）；**等本机 worker 不要起等待窗口**，直接循环 `arbitrate_wait(<workerJobId>, waitSec≤300)`（持有回合、不生成）；不确定则省略（实测降幅兜底）。旧写法 `unload:true/false` 等价 heavy/remote。",
         "- `timeoutSec` ≤900（超出被压到 900，返回体 `capSec` 给实际值）；更长的活拆窗，每窗留中间 marker。",
         "- **脚本必须写 `marker=<值>`（成功失败都写），不要把 stdout 重定向走**（插件已接进 job.log）。返回体 `reason` 给三态：script-died / no-start / stall。",
         "- marker 到手自动回归（卸 auxModels → 预热主模型）；连着跑重活传 `warm:false` 省时间。中途中断由插件四层兜底补 warm，任务在跑时绝不装回。",
@@ -1043,13 +1047,13 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.tools.register(defineTool({
     name: "arbitrate_run",
-    description: "串行执行一个后台任务。**卸不卸由任务分类 `lane` 决定**：`lane:\"heavy\"`（本地编译/重建/大下载/转写/大文件哈希）⇒ 起跑即卸（预防性腾 48 GB，不等实测）；`lane:\"remote\"`（远端主机测试 / ssh·scp 编排 / 远端探针 / 纯等待）⇒ 永不卸、**且立即返回 jobId**（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）；省略 ⇒ 起跑不卸 + 插件按实测降幅兜底（相对起点的降幅连续越阈值 ⇒ 当场卸，任务照跑，跑完装回）→ setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**重跑治理**：同一脚本再提交时，插件带上上次结果（`previous`），按失败类型三分（transient 放行 / intermittent 要 `change` 且限 `attemptBudget` 次 / permanent 直接拒）；连续 `circuitAfter` 次同因失败熔断，要求换方法。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
+    description: "串行执行一个后台任务。**卸不卸由任务分类 `lane` 决定**：`lane:\"heavy\"`（本地编译/重建/大下载/转写/大文件哈希）⇒ 起跑即卸（预防性腾 48 GB，不等实测）；`lane:\"remote\"`（远端主机测试 / ssh·scp 编排 / 远端探针）⇒ 永不卸、**且立即返回 jobId**。**等本机 worker 的纯等待不属于 remote**：不要起等待窗口，用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环（持有回合、不生成）（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）；省略 ⇒ 起跑不卸 + 插件按实测降幅兜底（相对起点的降幅连续越阈值 ⇒ 当场卸，任务照跑，跑完装回）→ setsid 后台启动脚本 → 轮询 marker → 返回结果。工具调用期间回合保持打开，返回时模型被按需装载、会话自动召回。脚本必须自己写 marker（成功和失败都要写，格式 marker=<值>）。**早期失败自动早退**：进程退出却没写 marker ⇒ marker=script-died / no-start；进程活着但日志静默 N 分钟 ⇒ marker=stall（都不再干等到超时）。marker 到手后自动回归：先卸 config.auxModels（谁卸谁）再发 1 token 预热主模型，把 provider 装载耗时吃在本调用里（见 warmMs/warmOk），用户下一条消息直接命中热模型。禁止在脚本里加看门狗杀 llama-swap 子进程。**重跑治理**：同一脚本再提交时，插件带上上次结果（`previous`），按失败类型三分（transient 放行 / intermittent 要 `change` 且限 `attemptBudget` 次 / permanent 直接拒）；连续 `circuitAfter` 次同因失败熔断，要求换方法。**timeoutSec 上限 900 秒（硬压）：更长的活必须拆成多个窗口**，每个窗口写一个中间 marker；拆不动就先改脚本让它能分段。",
     parameters: {
       script: { type: "string", required: true, description: "要执行的 bash 脚本内容。约定：结束时 echo 'marker=<值>'。" },
       label: { type: "string", description: "短标签，用于命名工作目录（默认 job）。" },
       change: { type: "string", description: "重跑时必须填：上次为什么失败 + 这次改了什么（一行）。首次提交可省略。transient 类失败不要求。" },
       timeoutSec: { type: "number", description: "最长等待秒数，默认 900，**上限 900（超出会被压到 900）**。更长的活拆窗。" },
-      lane: { type: "string", enum: ["heavy", "remote"], description: "任务分类（**卸不卸由它决定**）。\n**\"heavy\"＝本地编译 / 重建 / 大下载 / 转写 / 大文件哈希**（本任务要吃 GB 级本机内存）⇒ **起跑即卸**（预防性腾 48 GB，不等实测：本机可用仅 3–4 GB 且 swap 已用满，等实测出降幅再卸就是救火）。\n**\"remote\"＝远端主机的测试 / ssh·scp 编排 / 远端探针 / 纯等待取数** ⇒ **永不卸、立即返回 jobId**（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）。\n**省略＝未分类** ⇒ 起跑不卸 + 插件按实测降幅兜底（连续越阈值 ⇒ 当场卸）。" },
+      lane: { type: "string", enum: ["heavy", "remote"], description: "任务分类（**卸不卸由它决定**）。\n**\"heavy\"＝本地编译 / 重建 / 大下载 / 转写 / 大文件哈希**（本任务要吃 GB 级本机内存）⇒ **起跑即卸**（预防性腾 48 GB，不等实测：本机可用仅 3–4 GB 且 swap 已用满，等实测出降幅再卸就是救火）。\n**\"remote\"＝远端主机的测试 / ssh·scp 编排 / 远端探针** ⇒ **永不卸、立即返回 jobId**（等本机 worker 的等待**不是** remote：它要持有回合，用 `arbitrate_wait(<workerJobId>, waitSec≤300)` 循环，别起等待窗口）（不进等待循环、不占单窗口锁；结果用 `arbitrate_wait` 取）。\n**省略＝未分类** ⇒ 起跑不卸 + 插件按实测降幅兜底（连续越阈值 ⇒ 当场卸）。" },
       unload: { type: "boolean", description: "旧参数，已并入 `lane` 的兼容映射：`true` ⇒ 等价 `lane:\"heavy\"`（起跑即卸）；`false` ⇒ 等价 `lane:\"remote\"`（永不卸）。新提交请用 `lane`。" },
       warm: { type: "boolean", description: "任务结束后是否自动回归并预热：先按「谁卸谁」卸掉 config.auxModels，再发 1 token 请求触发 provider 装载，把装载耗时吃在本工具调用里。默认取 config.warmAfterRun；马上还要接着跑重活时传 false。" },
     },
@@ -1147,7 +1151,9 @@ export function apply(ctx, config = {}) {
       //     为什么不能等实测：本机实测可用 3.77 GB、zram swap 7.7 GB 已 100% 用满、模型 server RSS 47.0 GB
       //     ⇒ 等采样里看得见降幅时，GB 级已经分配出去了，那时才卸 48 GB 是救火不是预防
       //     （用户 2026-10-22：「本地编译不卸载你tm等着oom吗」）。
-      //   lane:"remote"（远端主机测试 / ssh·scp 编排 / 远端探针 / 纯等待取数）⇒ **永不卸**，判断层也不碰。
+      //   lane:"remote"（远端主机测试 / ssh·scp 编排 / 远端探针）⇒ **永不卸**，判断层也不碰。
+      //   ⚠ 等本机 worker 的等待**不是** remote：它要持有回合（否则主会话恢复生成、与 worker 抢同一条推理序列）。
+      //     正确姿势是 arbitrate_wait(<workerJobId>, waitSec≤300) 循环，不要起等待窗口。
       //   省略 ⇒ 未分类 ⇒ 起跑不卸 + 兜底判断：每 memSampleMs 采样，连续 escalateStreak 次
       //     「相对窗口起点的降幅 ≥ escalateDropMB」⇒ 当场卸（任务照跑），跑完装回。
       //   兼容映射：unload:true ⇒ heavy；unload:false ⇒ remote。
@@ -1188,7 +1194,7 @@ export function apply(ctx, config = {}) {
       let escalateOn = cfg.escalate !== false && gateSkip && kind === "unknown";
       let nextMemAt = Date.now() + memSampleMs, memStrikes = 0, escalated = null, maxDropMB = 0;
       const body = typeof script === "string" ? script : "";
-      await writeFile(sh, (cfg.singleWindow === false || kind === "remote" ? "" : windowLockSnippet(cfg, tag, jobId)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
+      await writeFile(sh, (cfg.singleWindow === false || kind === "remote" ? "" : windowLockSnippet(cfg, tag, jobId, dir, out, cap)) + (cfg.warmSelfScript && doWarmFlag ? selfWarmSnippet(cfg, target) : "") + body, "utf8");
       // 单一启动路径：setsid 脱离会话 + 重定向，detached 后 unref，绝不随会话退出
       const runner = spawn("bash", ["-c", `setsid bash ${JSON.stringify(sh)} </dev/null > ${JSON.stringify(out)} 2>&1 &`], {
         cwd: dir,
@@ -1442,7 +1448,19 @@ export function apply(ctx, config = {}) {
     async execute({ jobId, waitSec }) {
       const id = String(jobId || "").trim();
       let meta = null;
-      try { meta = JSON.parse(await readFile(join(jobDirOf(cfg), `${id}.json`), "utf8")); } catch { /* 没记录就报 job-not-found */ }
+      try { meta = JSON.parse(await readFile(join(jobDirOf(cfg), `${id}.json`), "utf8")); } catch { /* 没记录 ⇒ 走下面的目录兜底 */ }
+      // 2026-10-23 兜底：作业记录可能是老版本（缺 dir），或 detached 分支「记不下来也不阻塞返回」时根本没写。
+      //   $TMPDIR/arbitrate-<jobId> 是插件自己起窗口的固定形状 ⇒ 按 jobId 猜得到就继续等。
+      if (meta && !meta.dir) {
+        const guess = join(tmpdir(), `arbitrate-${id}`);
+        try {
+          const { statSync } = await import("node:fs");
+          if (statSync(guess).isDirectory()) {
+            meta = { ...meta, dir: guess, logPath: join(guess, "job.log"),
+                     deadlineAt: Number(meta.deadlineAt) || (Date.now() + (Number(meta.capSec) || 900) * 1000) };
+          }
+        } catch { /* 猜不到就保持原样 */ }
+      }
       if (!meta || !meta.dir) {
         return { jobId: id, done: true, alive: false, marker: "", reason: "job-not-found", elapsedSec: 0, quietSec: 0, logTail: "", logPath: "", workdir: "" };
       }
